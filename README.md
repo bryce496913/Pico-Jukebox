@@ -13,6 +13,9 @@ RIFF/WAVE files; other formats are skipped.
 [Pass 3 startup reliability](docs/STARTUP_RELIABILITY.md) describes deferred
 startup while soft power is OFF, safe peripheral failure handling, and Thonny
 real-device validation instructions.
+[Pass 4 PWM audio reliability](docs/PWM_AUDIO_RELIABILITY.md) audits the retained
+sample loop and signal math, explains optional on-device timing diagnostics, and
+provides the original-versus-updated audio comparison checklist.
 
 Run the host regression suite from this directory with Python 3.10+:
 
