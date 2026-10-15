@@ -31,7 +31,7 @@ class Controls(unittest.TestCase):
                 with self.subTest(state=state, event=event):
                     self.m['state'], self.m['index'] = state, 1
                     self.m['resume_path'], self.m['resume_offset'], self.m['resume_size'] = '/sd/B.wav', 10, 1200
-                    self.m['random'].getrandbits = Mock(return_value=2)
+                    self.m['random'].getrandbits = Mock(return_value=1)
                     self.m['apply_control'](event, '/sd/B.wav', 17, 1200)
                     expected = ('STOPPED' if event == 'stop' else
                                 ('PAUSED' if state == 'PLAYING' else 'PLAYING') if event == 'play' else state)
@@ -50,7 +50,7 @@ class Controls(unittest.TestCase):
                         self.assertEqual(self.m['resume_offset'], 10)
 
     def test_bounce_and_long_hold_produce_only_one_next_action(self):
-        self.m['random'].getrandbits = Mock(return_value=1)
+        self.m['random'].getrandbits = Mock(return_value=0)
         key = self.m['btn_next']
         key.level = 0
         self.assertEqual(self.poll(), 'next')
@@ -65,7 +65,7 @@ class Controls(unittest.TestCase):
         self.assertEqual(self.m['index'], 1)
         self.assertEqual(self.m['random'].getrandbits.call_count, 1)
         self.release()
-        self.m['random'].getrandbits.return_value = 2
+        self.m['random'].getrandbits.return_value = 1
         key.level = 0
         self.assertEqual(self.poll(), 'next')
         self.assertEqual(self.m['index'], 2)
@@ -125,7 +125,7 @@ class Controls(unittest.TestCase):
     def test_rapid_qualified_navigation_keeps_paused_state_and_resets_position(self):
         self.m['state'] = 'PAUSED'
         self.m['resume_path'], self.m['resume_offset'], self.m['resume_size'] = '/sd/A.wav', 33, 1200
-        self.m['random'].getrandbits = Mock(side_effect=[1, 2])
+        self.m['random'].getrandbits = Mock(side_effect=[0, 1])
         for event, index in [('next', 1), ('next', 2), ('prev', 1), ('prev', 0)]:
             self.release()
             self.m['btn_' + event].level = 0
@@ -235,7 +235,7 @@ class Controls(unittest.TestCase):
         self.h.files['A.wav'] = wav_bytes(b'\xff')
         self.h.files['B.wav'] = wav_bytes(b'\x80')
         self.m['btn_play'].level = 0
-        self.m['random'].getrandbits = Mock(side_effect=[1, 2])
+        self.m['random'].getrandbits = Mock(side_effect=[0, 1])
         self.h.run_loop()
         self.assertEqual((self.m['state'], self.m['index']), ('PLAYING', 1))
         self.h.run_loop()
@@ -245,7 +245,7 @@ class Controls(unittest.TestCase):
     def test_held_next_changes_only_once_while_playing_and_stop_can_interrupt_it(self):
         self.m['state'] = 'PLAYING'
         self.m['btn_next'].level = 0
-        self.m['random'].getrandbits = Mock(return_value=1)
+        self.m['random'].getrandbits = Mock(return_value=0)
         self.h.run_loop()  # consume Next, select B
         self.assertEqual(self.m['index'], 1)
         count = 0
@@ -272,6 +272,7 @@ class Controls(unittest.TestCase):
 
 
     def test_paused_track_change_plays_selected_track_from_its_beginning(self):
+        self.m['random'].getrandbits = Mock(return_value=0)
         self.h.files['B.wav'] = wav_bytes(b'\xe0' * 20)
         self.m['state'] = 'PLAYING'
         self.m['btn_play'].level = 0
@@ -339,7 +340,7 @@ class Controls(unittest.TestCase):
 
     def test_rapid_playing_navigation_keeps_state_and_selects_correct_file(self):
         self.m['state'] = 'PLAYING'
-        self.m['random'].getrandbits = Mock(side_effect=[1, 2])
+        self.m['random'].getrandbits = Mock(side_effect=[0, 1])
         for event, index in [('next', 1), ('prev', 0), ('next', 2)]:
             self.release()
             self.m['btn_' + event].level = 0
@@ -376,7 +377,7 @@ class Controls(unittest.TestCase):
     def test_off_at_eof_cleanup_takes_priority_over_auto_advance(self):
         self.h.files['A.wav'] = wav_bytes(b'\xff')
         self.m['state'] = 'PLAYING'
-        self.m['random'].getrandbits = Mock(return_value=1)
+        self.m['random'].getrandbits = Mock(return_value=0)
         output = self.m['speaker']
         write = output.duty_u16
         seen_audio = False

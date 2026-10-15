@@ -18,6 +18,8 @@ sample loop and signal math, explains optional on-device timing diagnostics, and
 provides the original-versus-updated audio comparison checklist.
 [Pass 5 controls and states](docs/CONTROLS_AND_STATES.md) defines debounce, exact
 pause/resume, navigation and OFF/ON transitions with the validation results.
+[Pass 6 display, LED and shuffle](docs/DISPLAY_LED_SHUFFLE.md) documents cached
+LCD rendering, brightness scaling and bounded selection, plus hardware checks.
 
 Run the host regression suite from this directory with Python 3.10+:
 

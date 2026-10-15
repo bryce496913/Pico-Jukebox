@@ -129,31 +129,31 @@ class Audio(unittest.TestCase):
                 self.assertEqual((self.m['state'], self.m['index']), ('PLAYING', 1))
                 self.assertTrue(self.h.handles[-1].closed)
 
-    def test_normal_shuffle_retry_still_avoids_current_track(self):
+    def test_two_track_shuffle_avoids_current_without_draw(self):
         self.start()
         self.m['btn_next'].level = 0
         self.m['random'].getrandbits = Mock(side_effect=[0, 0, 1])
         self.assertEqual(self.play(), 'track_change')
         self.assertEqual(self.m['index'], 1)
-        self.assertEqual(self.m['random'].getrandbits.call_count, 3)
+        self.assertEqual(self.m['random'].getrandbits.call_count, 0)
 
-    def test_stuck_shuffle_during_audio_is_bounded_mutes_and_stops(self):
+    def test_repeated_random_value_cannot_stall_two_track_switch(self):
         self.start()
         self.m['btn_next'].level = 0
         self.m['random'].getrandbits = Mock(return_value=0)
-        self.assertEqual(self.play(), 'error')
-        self.assertEqual(self.m['random'].getrandbits.call_count, 32)
-        self.assertEqual(self.emitted(), [2550, 0, 0, 0])
-        self.assertEqual((self.m['state'], self.m['index']), ('STOPPED', 0))
+        self.assertEqual(self.play(), 'track_change')
+        self.assertEqual(self.m['random'].getrandbits.call_count, 0)
+        self.assertEqual(self.emitted(), [2550, 0, 0])
+        self.assertEqual((self.m['state'], self.m['index']), ('PLAYING', 1))
         self.assertTrue(self.h.handles[-1].closed)
 
-    def test_stuck_shuffle_at_eof_does_not_restart_or_hold_audio(self):
+    def test_two_track_eof_alternates_and_mutes_between_tracks(self):
         self.start(b'\xff')
         self.m['random'].getrandbits = Mock(return_value=0)
         self.h.run_loop(3)
-        self.assertEqual(self.m['random'].getrandbits.call_count, 32)
-        self.assertEqual(self.m['state'], 'STOPPED')
-        self.assertTrue(self.output.deinitialized)
+        self.assertEqual(self.m['random'].getrandbits.call_count, 0)
+        self.assertEqual(self.m['state'], 'PLAYING')
+        self.assertFalse(self.output.deinitialized)
         self.assertEqual(self.output.duties[-1], 0)
         self.assertTrue(self.h.handles[-1].closed)
 

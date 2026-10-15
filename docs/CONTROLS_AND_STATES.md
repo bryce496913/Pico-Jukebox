@@ -45,7 +45,8 @@ changing state/index and updates the LCD/status LED through one shared function.
 | Any state | Hardware fault | STOPPED/fault | Clear saved position | Existing fault UI/console; release outputs and require repair/reset |
 
 Previous remains previous in sorted track order, not playback history. Random
-Next retains rejection sampling and the existing 32-attempt fault bound. A paused
+Pass 6 replaces the original 32-attempt rejection sampling with one draw over
+eligible tracks; see [display, LED and shuffle](DISPLAY_LED_SHUFFLE.md). A paused
 selection stays paused even with a single-track library. Pausing on the final
 sample saves the data-end position; resume emits no duplicate sample and processes
 normal EOF. Storage/fault states retain their earlier recovery rules and do not

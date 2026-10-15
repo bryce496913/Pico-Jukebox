@@ -4,17 +4,20 @@ class RGB_LED:
     def __init__(self, r_pin, g_pin, b_pin):
         self.red = self.green = self.blue = None
         self.pins = (r_pin, g_pin, b_pin)
+        self._r = self._g = self._b = None
         try:
             for name, number in zip(("red", "green", "blue"), self.pins):
                 channel = PWM(Pin(number))
                 setattr(self, name, channel)
                 channel.duty_u16(0)  # mute each output before further setup
                 channel.freq(1000)
+            self._r = self._g = self._b = 0
         except BaseException:
             self.deinit()
             raise
 
     def deinit(self):
+        self._r = self._g = self._b = None
         # Release every allocated channel even if an earlier operation fails.
         for name in ("red", "green", "blue"):
             channel = getattr(self, name)
@@ -39,9 +42,16 @@ class RGB_LED:
         return int(value * 257)
 
     def color(self, r, g, b):
-        self.red.duty_u16(self._duty(r))
-        self.green.duty_u16(self._duty(g))
-        self.blue.duty_u16(self._duty(b))
+        # Commit each channel cache only after its write succeeds.
+        if r != self._r:
+            self.red.duty_u16(self._duty(r))
+            self._r = r
+        if g != self._g:
+            self.green.duty_u16(self._duty(g))
+            self._g = g
+        if b != self._b:
+            self.blue.duty_u16(self._duty(b))
+            self._b = b
 
     def off(self):
         self.color(0, 0, 0)
