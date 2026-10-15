@@ -203,7 +203,7 @@ class StoragePlayback(unittest.TestCase):
 
         self.h.clock.sleep_us = power_off
         self.h.run_loop(2)
-        self.assertEqual((m['index'], m['state']), (0, 'PLAYING'))
+        self.assertEqual((m['index'], m['state']), (0, 'STOPPED'))
         self.assertEqual(m['lcd'].lines[0].rstrip(), 'POWER OFF')
         self.assertEqual(m['speaker'].duties[-1], 0)
         self.assertTrue(self.h.handles[-1].closed)
@@ -212,7 +212,8 @@ class StoragePlayback(unittest.TestCase):
         m = self.start()
         m['index'] = 0
         m['slide'].level = 1
-        self.assertEqual(m['play_wav']('/sd/A.WAV'), 'interrupted')
+        with patch('builtins.print'):
+            self.assertEqual(m['play_wav']('/sd/A.WAV'), 'interrupted')
         self.assertEqual(m['index'], 0)
         self.assertEqual(m['speaker'].duties[-1], 0)
         self.assertTrue(self.h.handles[-1].closed)

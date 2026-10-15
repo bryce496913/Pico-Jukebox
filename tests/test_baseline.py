@@ -83,6 +83,9 @@ class Baseline(unittest.TestCase):
                 self.assertEqual(self.m['speaker'].duties[-1], 0)
                 self.assertTrue(self.h.handles[-1].closed)
                 self.m[button].level = 1
+                self.m['controls'].released(self.h.clock.ticks_ms())
+                self.h.clock.sleep_ms(30)
+                self.m['controls'].released(self.h.clock.ticks_ms())
         self.start()
         self.m['btn_stop'].level = self.m['btn_play'].level = 0
         self.assertEqual(self.m['play_wav']('/sd/b.wav'), 'stopped')
@@ -93,11 +96,11 @@ class Baseline(unittest.TestCase):
             self.assertEqual(self.m['play_wav']('/sd/missing.wav'), 'error')
         self.assertEqual(self.m['state'], 'STOPPED')
 
-    def test_soft_off_preserves_state_and_mutes(self):
+    def test_soft_off_stops_and_mutes(self):
         self.m['state'] = 'PAUSED'
         self.m['slide'].level = 1
         self.h.run_loop(2)
-        self.assertEqual(self.m['state'], 'PAUSED')
+        self.assertEqual(self.m['state'], 'STOPPED')
         self.assertEqual(self.m['lcd'].lines[0].rstrip(), 'POWER OFF')
         self.assertEqual(self.m['speaker'].duties[-1], 0)
         self.assertEqual(self.m['led'].red.duties[-1], 0)
@@ -116,15 +119,16 @@ class Baseline(unittest.TestCase):
         self.assertEqual((self.m['index'], self.m['state']), (1, 'PLAYING'))
         self.assertEqual(self.m['speaker'].duties[-1], 0)
 
-    def test_held_play_immediately_pauses_again(self):
-        self.m['slide'].level = 0
-        self.m['state'] = 'PAUSED'
+    def test_held_play_does_not_immediately_pause_again(self):
+        self.m['state'] = 'STOPPED'
         self.m['btn_play'].level = 0
-        self.h.run_loop()
-        self.assertEqual(self.m['state'], 'PAUSED')  # held level is seen again inside playback
-        self.assertTrue(self.h.handles[-1].closed)
+        event = self.m['poll_controls']()
+        self.m['apply_control'](event)
+        self.assertEqual(self.m['play_wav']('/sd/b.wav'), 'ended')
+        self.assertEqual(self.m['state'], 'PLAYING')
+        self.assertIsNone(self.m['poll_controls']())
 
-    def test_pause_then_replay_reopens_from_first_sample(self):
+    def test_pause_then_resume_starts_at_first_unplayed_sample(self):
         self.start()
         self.m['btn_play'].level = 0
         self.assertEqual(self.m['play_wav']('/sd/b.wav'), 'paused')
@@ -132,7 +136,7 @@ class Baseline(unittest.TestCase):
         self.m['state'] = 'PLAYING'
         before = len(self.m['speaker'].duties)
         self.assertEqual(self.m['play_wav']('/sd/b.wav'), 'ended')
-        self.assertEqual(self.m['speaker'].duties[before:], [0, 1280, 2550, 0])
+        self.assertEqual(self.m['speaker'].duties[before:], [1280, 2550, 0])
         self.assertEqual(len(self.h.handles), 4)  # two discovery probes and two plays
         self.assertTrue(all(f.closed for f in self.h.handles))
 

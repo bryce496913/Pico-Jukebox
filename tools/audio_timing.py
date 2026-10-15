@@ -1,6 +1,7 @@
 """Opt-in MicroPython whole-file timing; never imported by normal firmware.
 
-Supply the known payload sample count for an unchanged comparison fixture.
+Supply the known sample count for this call on an unchanged fixture: for a
+resume, pass the remaining count, not the full song length.
 The player must return 'ended' only when all samples have been emitted. This
 measures the whole call, including headers, SD/GC/UI stalls and mute/close work;
 it cannot measure individual sample periods, jitter, pitch or electrical audio.

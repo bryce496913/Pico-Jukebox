@@ -158,6 +158,7 @@ class Harness:
                         'random': self.random, 'micropython': types.SimpleNamespace(const=lambda n: n)}
         self.modules['rgb_led'] = self.load('rgb_led.py')
         self.modules['wav_reader'] = self.load('wav_reader.py')
+        self.modules['buttons'] = self.load('buttons.py')
         self.modules['sdcard'] = types.SimpleNamespace(SDCard=lambda spi, cs: object())
         self.modules['i2c_lcd'] = types.SimpleNamespace(I2cLcd=LCD)
 

@@ -143,7 +143,7 @@ class Audio(unittest.TestCase):
         self.m['random'].getrandbits = Mock(return_value=0)
         self.assertEqual(self.play(), 'error')
         self.assertEqual(self.m['random'].getrandbits.call_count, 32)
-        self.assertEqual(self.emitted(), [2550, 0, 0])
+        self.assertEqual(self.emitted(), [2550, 0, 0, 0])
         self.assertEqual((self.m['state'], self.m['index']), ('STOPPED', 0))
         self.assertTrue(self.h.handles[-1].closed)
 
