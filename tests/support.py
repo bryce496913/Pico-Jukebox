@@ -2,11 +2,24 @@
 import ast
 import builtins
 import io
+import struct
 from pathlib import Path
 import types
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def riff_chunk(name, data):
+    return name + struct.pack('<I', len(data)) + data + (b'\0' if len(data) & 1 else b'')
+
+
+def wav_bytes(samples=b'\0\x80\xff', extra=b'', trailing=b'', **format_fields):
+    fields = dict(encoding=1, channels=1, rate=8000, byte_rate=8000, align=1, bits=8)
+    fields.update(format_fields)
+    fmt = struct.pack('<HHIIHH', *(fields[k] for k in ('encoding', 'channels', 'rate', 'byte_rate', 'align', 'bits')))
+    body = b'WAVE' + extra + riff_chunk(b'fmt ', fmt) + riff_chunk(b'data', samples) + trailing
+    return b'RIFF' + struct.pack('<I', len(body)) + body
 
 
 class Pin:
@@ -108,13 +121,16 @@ class Harness:
     def __init__(self, files=None, devices=None):
         self.clock = Clock()
         self.machine = types.SimpleNamespace(Pin=Pin, PWM=PWM, ADC=ADC, SPI=Bus, I2C=Bus)
-        self.files = files if files is not None else {'b.wav': b'\0' * 44 + b'\x00\x80\xff', 'A.WAV': b'\0' * 44, 'ignore.txt': b''}
-        self.handles, self.mounts = [], []
-        self.os = types.SimpleNamespace(listdir=lambda path: list(self.files), mount=lambda sd, path: self.mounts.append(path))
+        self.files = files if files is not None else {'b.wav': wav_bytes(), 'A.WAV': wav_bytes(b'\x80'), 'ignore.txt': b''}
+        self.handles, self.mounts, self.unmounts = [], [], []
+        self.os = types.SimpleNamespace(listdir=lambda path: list(self.files), mount=lambda sd, path: self.mounts.append(path),
+                                        umount=lambda path: self.unmounts.append(path),
+                                        stat=lambda path: (0x8000,))
         self.random = types.SimpleNamespace(seed=lambda seed: None, getrandbits=lambda bits: 1)
         self.modules = {'machine': self.machine, 'time': self.clock, 'os': self.os,
                         'random': self.random, 'micropython': types.SimpleNamespace(const=lambda n: n)}
         self.modules['rgb_led'] = self.load('rgb_led.py')
+        self.modules['wav_reader'] = self.load('wav_reader.py')
         self.modules['sdcard'] = types.SimpleNamespace(SDCard=lambda spi, cs: object())
         self.modules['i2c_lcd'] = types.SimpleNamespace(I2cLcd=LCD)
         if devices is not None:
@@ -127,7 +143,11 @@ class Harness:
         return module
 
     def open(self, path, mode):
-        handle = io.BytesIO(self.files[path.removeprefix('/sd/')])
+        name = path.removeprefix('/sd/')
+        if name not in self.files:
+            raise OSError('File missing')
+        data = self.files[name]
+        handle = data() if callable(data) else io.BytesIO(data)
         self.handles.append(handle)
         return handle
 

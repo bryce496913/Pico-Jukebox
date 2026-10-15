@@ -1,5 +1,8 @@
 # Pass 1 baseline audit
 
+This is the historical Pass 1 snapshot. See [Pass 2](STORAGE_RELIABILITY.md) for
+resolved SD/WAV findings, updated storage behavior and current validation.
+
 Reviewed all 13 tracked Python files at local baseline
 `797f39954e54efb63775376527d91d39de00fad6` on 2026-10-14. No configuration modules,
 package metadata, CI, or automated regression suite existed. The user's real
