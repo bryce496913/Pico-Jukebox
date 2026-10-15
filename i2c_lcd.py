@@ -4,7 +4,6 @@ Supports 16x2 and 20x4 LCDs
 """
 
 import time
-from machine import I2C
 
 # LCD commands
 LCD_CLR             = 0x01
