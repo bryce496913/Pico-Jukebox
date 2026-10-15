@@ -8,158 +8,337 @@ from rgb_led import RGB_LED
 from wav_reader import audio_data, read_exact, WavError
 
 # ----------------------------------------------------
-# HARDWARE SETUP
+# STARTUP AND SAFE HARDWARE OPERATIONS
 # ----------------------------------------------------
+SPEAKER_CARRIER_HZ = 40000
+BOOT_SPEAKER_DUTY = 2000  # ~3% duty; formerly 30000. Verify audibility on device.
+LCD_I2C_HZ = 100000
+LCD_ADDRESS = 0x27
 
-# Slide switch (Power control)
-slide = Pin(22, Pin.IN, Pin.PULL_UP)
-
-# Buttons
-btn_play = Pin(16, Pin.IN, Pin.PULL_UP)
-btn_stop = Pin(17, Pin.IN, Pin.PULL_UP)
-btn_next = Pin(19, Pin.IN, Pin.PULL_UP)
-btn_prev = Pin(21, Pin.IN, Pin.PULL_UP)
-
-# RGB LED (R=GP5, G=GP8, B=GP9)
-led = RGB_LED(5, 8, 9)
-
-# Speaker (PWM on GP18)
-speaker = PWM(Pin(18))
-speaker.freq(40000)
-speaker.duty_u16(0)
-
-# Potentiometer volume control (ADC0 / GP26)
-pot = ADC(26)
-
-def get_volume8():
-    """Return volume in 0-255 range."""
-    return pot.read_u16() >> 8
-
-# LCD (I2C0)
-i2c = I2C(0, sda=Pin(0), scl=Pin(1), freq=100000)
-
-devices = i2c.scan()
-print("I2C devices found:", devices)
-
-if not devices:
-    print("No I2C devices found")
-    while True:
-        time.sleep(1)
-
-lcd_addr = 0x27
-if lcd_addr not in devices:
-    lcd_addr = devices[0]
-
-lcd = I2cLcd(i2c, lcd_addr, 2, 16)
-
-# ----------------------------------------------------
-# BOOT TESTS
-# ----------------------------------------------------
-
-def boot_lcd_test():
-    print("Starting LCD boot test...")
-
-    lcd.backlight_on()
-
-    lcd.clear()
-    lcd.move_to(0, 0)
-    lcd.putstr("HELLO BRYCE")
-    lcd.move_to(0, 1)
-    lcd.putstr("LCD WORKING")
-    print("LCD test screen 1 written")
-    time.sleep(2)
-
-    lcd.clear()
-    lcd.move_to(0, 0)
-    lcd.putstr("PICO JUKEBOX")
-    lcd.move_to(0, 1)
-    lcd.putstr("ADDR 0x27")
-    print("LCD test screen 2 written")
-    time.sleep(2)
-
-    lcd.clear()
-
-def boot_speaker_test():
-    print("Starting speaker boot test...")
-
-    lcd.clear()
-    lcd.move_to(0, 0)
-    lcd.putstr("SPEAKER TEST")
-    lcd.move_to(0, 1)
-    lcd.putstr("SWEEPING TONES")
-
-    speaker.duty_u16(30000)
-
-    for freq in range(200, 2000, 50):
-        speaker.freq(freq)
-        time.sleep(0.05)
-
-    speaker.duty_u16(0)
-    speaker.freq(40000)
-
-    print("Speaker boot test done.")
-    time.sleep(0.5)
-    lcd.clear()
-
-boot_lcd_test()
-boot_speaker_test()
-
-# ----------------------------------------------------
-# SD SETUP
-# ----------------------------------------------------
-
-# Fail closed once per boot; no automatic remount/restart loop on a bad card.
-storage_error = None
+slide = speaker_pin = speaker = led = pot = lcd = i2c = None
+btn_play = btn_stop = btn_next = btn_prev = None
+hardware_error = storage_error = None
+storage_mounted = storage_complete = False
+spi = cs = sd = None
+outputs_released = False
 tracks = []
-storage_mounted = False
+index = 0
+state = "STOPPED"
+startup_complete = False
+lcd_test_attempted = speaker_test_attempted = False
+lcd_lines = [None, None]
 
-try:
-    spi = SPI(1,
-              baudrate=1_000_000,
-              polarity=0,
-              phase=0,
-              bits=8,
-              firstbit=SPI.MSB,
-              sck=Pin(10),
-              mosi=Pin(11),
-              miso=Pin(12))
 
-    cs = Pin(13, Pin.OUT)
-    sd = sdcard.SDCard(spi, cs)
-    os.mount(sd, "/sd")
-    storage_mounted = True
+def mute_speaker():
+    """Best-effort silence, including a PWM API failure; never mask cleanup."""
+    global speaker, hardware_error, state
+    if speaker is None:
+        return
+    try:
+        speaker.duty_u16(0)
+        return
+    except Exception as e:
+        print("Speaker mute failed:", e)
+        hardware_error = "SPEAKER ERROR"
+        state = "STOPPED"
+    try:
+        speaker.deinit()
+    except Exception as e:
+        print("Speaker deinit failed:", e)
+    speaker = None
+    try:
+        speaker_pin.init(Pin.OUT, value=0)
+    except Exception as e:
+        print("Speaker GPIO fallback failed:", e)
 
-    # Keep case-insensitive WAV discovery and the original sorted index order.
-    for name in sorted(os.listdir("/sd")):
-        if not name.lower().endswith(".wav"):
-            continue
-        path = "/sd/" + name
+
+def shutdown_outputs():
+    """Release outputs after an aborted startup or an interpreter interrupt."""
+    global speaker, led, storage_mounted, outputs_released
+    if outputs_released:
+        return
+    outputs_released = True
+    mute_speaker()
+    if speaker is not None:
         try:
-            if os.stat(path)[0] & 0xF000 != 0x8000:
-                continue
-            with open(path, "rb") as music:
-                audio_data(music)
-            tracks.append(name)
-        except (OSError, WavError) as e:
-            print("Skipping WAV:", name, e)
-    if not tracks:
-        storage_error = "NO WAV FILES"
-except Exception as e:
-    print("SD storage error:", e)
-    storage_error = "SD ERROR"
-    tracks = []
+            speaker.deinit()
+        except Exception as e:
+            print("Speaker deinit failed:", e)
+        speaker = None
+    if speaker_pin is not None:
+        try:
+            speaker_pin.init(Pin.OUT, value=0)
+        except Exception as e:
+            print("Speaker GPIO fallback failed:", e)
+    if led is not None:
+        led.deinit()
+        led = None
     if storage_mounted:
         try:
             os.umount("/sd")
-        except OSError:
-            pass
+        except Exception as e:
+            print("SD unmount failed:", e)
         storage_mounted = False
-finally:
-    speaker.duty_u16(0)
+
+
+def hardware_fault(message, error):
+    global hardware_error, state
+    # Latch the first fault. Never retry initialization/self-tests in a fault loop.
+    if hardware_error is None:
+        hardware_error = message
+        print(message + ":", error)
+    state = "STOPPED"
+    mute_speaker()
+
+
+def power_on():
+    if slide is None or hardware_error == "GPIO ERROR":
+        return False
+    try:
+        return slide.value() == 0
+    except Exception as e:
+        hardware_fault("GPIO ERROR", e)
+        return False
+
+
+def lcd_call(method, *args):
+    global lcd
+    if lcd is None:
+        return False
+    try:
+        getattr(lcd, method)(*args)
+        return True
+    except Exception as e:
+        lcd = None  # suppress repeated bus writes/logging after a failed display
+        hardware_fault("LCD ERROR", e)
+        return False
+
+
+def led_call(method, *args):
+    global led
+    if led is None:
+        return
+    try:
+        getattr(led, method)(*args)
+    except Exception as e:
+        led.deinit()
+        led = None
+        hardware_fault("RGB ERROR", e)
+
+
+def boot_wait(milliseconds):
+    # Bound OFF response during screens, sweep and its settling delay to 20 ms,
+    # excluding time spent inside a synchronous hardware call.
+    while milliseconds > 0:
+        if not power_on() or hardware_error:
+            return False
+        delay = min(20, milliseconds)
+        time.sleep_ms(delay)
+        milliseconds -= delay
+    return power_on() and hardware_error is None
+
+
+def show_screen(first, second=""):
+    write_lcd_line(0, first)
+    write_lcd_line(1, second)
+
+
+def boot_lcd_test():
+    global lcd_test_attempted
+    if lcd_test_attempted:
+        return
+    lcd_test_attempted = True
+    print("Starting LCD boot test...")
+    show_screen("HELLO BRYCE", "LCD WORKING")
+    if boot_wait(2000):
+        show_screen("PICO JUKEBOX", "ADDR 0x%02X" % lcd_addr)
+        boot_wait(2000)
+
+
+def boot_speaker_test():
+    global speaker_test_attempted
+    if speaker_test_attempted:
+        return
+    speaker_test_attempted = True
+    print("Starting speaker boot test...")
+    show_screen("SPEAKER TEST", "SWEEPING TONES")
+    try:
+        if power_on() and hardware_error is None:
+            speaker.duty_u16(BOOT_SPEAKER_DUTY)
+            for frequency in range(200, 2000, 50):
+                if not power_on() or hardware_error:
+                    break
+                speaker.freq(frequency)
+                if not boot_wait(50):
+                    break
+    finally:
+        mute_speaker()
+        if speaker is not None:
+            try:
+                speaker.freq(SPEAKER_CARRIER_HZ)
+            except Exception as e:
+                hardware_fault("SPEAKER ERROR", e)
+                shutdown_outputs()
+    print("Speaker boot test done.")
+    boot_wait(500)
+
+
+def initialize_storage():
+    global spi, cs, sd, tracks, storage_error, storage_mounted, storage_complete
+    if storage_complete:
+        return True
+    try:
+        if spi is None:
+            spi = SPI(1,
+                      baudrate=1_000_000,
+                      polarity=0,
+                      phase=0,
+                      bits=8,
+                      firstbit=SPI.MSB,
+                      sck=Pin(10),
+                      mosi=Pin(11),
+                      miso=Pin(12))
+            cs = Pin(13, Pin.OUT, value=1)
+        if not power_on():
+            return False
+        if sd is None:
+            sd = sdcard.SDCard(spi, cs)
+        if not power_on():
+            return False
+        if not storage_mounted:
+            os.mount(sd, "/sd")
+            storage_mounted = True
+        if not power_on():
+            return False
+
+        # Keep case-insensitive WAV discovery and the original sorted index order.
+        tracks = []
+        for name in sorted(os.listdir("/sd")):
+            if not power_on():
+                return False
+            if not name.lower().endswith(".wav"):
+                continue
+            path = "/sd/" + name
+            try:
+                if os.stat(path)[0] & 0xF000 != 0x8000:
+                    continue
+                with open(path, "rb") as music:
+                    audio_data(music)
+                tracks.append(name)
+            except (OSError, WavError) as e:
+                print("Skipping WAV:", name, e)
+        if not tracks:
+            storage_error = "NO WAV FILES"
+    except Exception as e:
+        print("SD storage error:", e)
+        storage_error = "SD ERROR"
+        tracks = []
+        if storage_mounted:
+            try:
+                os.umount("/sd")
+            except OSError:
+                pass
+            storage_mounted = False
+    finally:
+        mute_speaker()
+    storage_complete = True
+    return True
+
+
+def initialize_hardware():
+    """Resume deferred stages only on ON; completed stages/tests never repeat."""
+    global i2c, lcd, lcd_addr, led, pot, speaker, startup_complete
+    global btn_play, btn_stop, btn_next, btn_prev, index, outputs_released
+    if startup_complete or hardware_error or not power_on():
+        return
+    outputs_released = False
+    stage = "RGB ERROR"
+    try:
+        if led is None:
+            led = RGB_LED(5, 8, 9)
+        if not power_on():
+            return
+        stage = "LCD ERROR"
+        if lcd is None:
+            i2c = I2C(0, sda=Pin(0), scl=Pin(1), freq=LCD_I2C_HZ)
+            devices = i2c.scan()
+            print("I2C devices found:", devices)
+            if not devices:
+                raise OSError("No I2C devices on I2C0 (SDA GP0, SCL GP1)")
+            if LCD_ADDRESS in devices:
+                lcd_addr = LCD_ADDRESS
+            else:
+                candidates = [addr for addr in devices
+                              if 0x20 <= addr <= 0x27 or 0x38 <= addr <= 0x3F]
+                if len(candidates) != 1:
+                    raise OSError("Expected LCD 0x27; no unambiguous PCF8574 address")
+                lcd_addr = candidates[0]
+            lcd = I2cLcd(i2c, lcd_addr, 2, 16)
+            lcd.backlight_on()
+        if not power_on():
+            return
+        stage = "GPIO ERROR"
+        if btn_play is None:
+            btn_play = Pin(16, Pin.IN, Pin.PULL_UP)
+            btn_stop = Pin(17, Pin.IN, Pin.PULL_UP)
+            btn_next = Pin(19, Pin.IN, Pin.PULL_UP)
+            btn_prev = Pin(21, Pin.IN, Pin.PULL_UP)
+        stage = "ADC ERROR"
+        if pot is None:
+            pot = ADC(26)
+            pot.read_u16()  # verify before either self-test can produce sound
+        if not power_on():
+            return
+        stage = "SPEAKER ERROR"
+        if speaker is None:
+            speaker = PWM(speaker_pin)
+            speaker.duty_u16(0)  # silence before configuring a frequency
+            speaker.freq(SPEAKER_CARRIER_HZ)
+        stage = "LCD ERROR"
+        boot_lcd_test()
+        if not power_on() or hardware_error:
+            return
+        stage = "SPEAKER ERROR"
+        boot_speaker_test()
+        if not power_on() or hardware_error:
+            return
+        stage = "SD ERROR"
+        if not initialize_storage() or not power_on() or hardware_error:
+            return
+        stage = "ADC ERROR"
+        seed_random()
+        index = random_track_index(None)
+        startup_complete = True
+    except Exception as e:
+        hardware_fault(stage, e)
+    except BaseException:
+        shutdown_outputs()
+        raise
+    finally:
+        mute_speaker()
+        if hardware_error:
+            shutdown_outputs()
+
+
+# Only safe GPIO levels and the soft-power input are configured before ON.
+# In particular no PWM, LCD scan, ADC, SD mount or boot sound is started while OFF.
+try:
+    speaker_pin = Pin(18, Pin.OUT, value=0)
+    for gpio in (5, 8, 9):
+        Pin(gpio, Pin.OUT, value=0)
+    slide = Pin(22, Pin.IN, Pin.PULL_UP)
+except Exception as e:
+    hardware_fault("GPIO ERROR", e)
+    shutdown_outputs()
 
 # ----------------------------------------------------
 # RANDOM / SHUFFLE HELPERS
 # ----------------------------------------------------
+
+def get_volume8():
+    """Return volume in 0-255 range after ADC initialization."""
+    return pot.read_u16() >> 8
+
 
 def seed_random():
     seed = time.ticks_us() ^ pot.read_u16() ^ len(tracks)
@@ -175,11 +354,6 @@ def random_track_index(current_index=None):
         new_index = random.getrandbits(16) % len(tracks)
 
     return new_index
-
-seed_random()
-
-index = random_track_index(None)
-state = "STOPPED"
 
 # ----------------------------------------------------
 # LCD SCROLLING TITLE HELPERS
@@ -209,8 +383,10 @@ def clean_title(filename):
     return title
 
 def write_lcd_line(row, text):
-    lcd.move_to(0, row)
-    lcd.putstr(pad_lcd(text))
+    line = pad_lcd(text)
+    if lcd is not None and lcd_lines[row] != line:
+        if lcd_call("move_to", 0, row) and lcd_call("putstr", line):
+            lcd_lines[row] = line
 
 def current_title_window():
     title = clean_title(tracks[index])
@@ -269,7 +445,7 @@ def update_music_led(chunk):
     if brightness > 255:
         brightness = 255
 
-    led.color(0, brightness, 0)
+    led_call("color", 0, brightness, 0)
 
 # ----------------------------------------------------
 # WAV PLAYER
@@ -278,15 +454,21 @@ def update_music_led(chunk):
 def play_wav(path):
     global state, index
 
+    if hardware_error or speaker is None:
+        mute_speaker()
+        state = "STOPPED"
+        return "error"
     try:
         with open(path, "rb") as f:
             remaining = audio_data(f)
 
-            while remaining and state == "PLAYING" and slide.value() == 0:
+            while remaining and state == "PLAYING" and power_on() and hardware_error is None:
                 chunk = read_exact(f, min(512, remaining))
                 remaining -= len(chunk)
 
                 update_music_led(chunk)
+                if hardware_error:
+                    return "error"
 
                 for b in chunk:
                     volume8 = pot.read_u16() >> 8
@@ -299,24 +481,24 @@ def play_wav(path):
 
                     if btn_stop.value() == 0:
                         state = "STOPPED"
-                        speaker.duty_u16(0)
+                        mute_speaker()
                         return "stopped"
 
                     if btn_play.value() == 0:
                         state = "PAUSED"
-                        speaker.duty_u16(0)
+                        mute_speaker()
                         return "paused"
 
                     if btn_next.value() == 0:
                         index = random_track_index(index)
                         state = "PLAYING"
-                        speaker.duty_u16(0)
+                        mute_speaker()
                         return "track_change"
 
                     if btn_prev.value() == 0:
                         index = (index - 1) % len(tracks)
                         state = "PLAYING"
-                        speaker.duty_u16(0)
+                        mute_speaker()
                         return "track_change"
 
                 update_title_scroll()
@@ -325,46 +507,47 @@ def play_wav(path):
             return "ended" if remaining == 0 else "interrupted"
 
     except Exception as e:
-        speaker.duty_u16(0)
+        mute_speaker()
         state = "STOPPED"
         print("WAV error:", e)
         return "error"
     finally:
         # Also covers EOF, parse/read failures and Ctrl-C/BaseException exits.
-        speaker.duty_u16(0)
+        mute_speaker()
 
 # ----------------------------------------------------
 # UI HELPERS
 # ----------------------------------------------------
 
 def update_display():
-    lcd.clear()
-    if storage_error:
-        lcd.putstr(storage_error)
+    if hardware_error or storage_error:
+        show_screen(hardware_error or storage_error)
         return
-
-    lcd.move_to(0, 0)
-    lcd.putstr(pad_lcd(state))
+    if not startup_complete:
+        return
+    write_lcd_line(0, state)
 
     reset_title_scroll()
     update_title_scroll(force=True)
 
 def update_led():
     if state == "PLAYING":
-        led.green_on()
+        led_call("green_on")
     elif state == "PAUSED":
-        led.blue_on()
+        led_call("blue_on")
     elif state == "STOPPED":
-        led.red_on()
+        led_call("red_on")
     else:
-        led.off()
+        led_call("off")
 
 # ----------------------------------------------------
 # INITIAL UI
 # ----------------------------------------------------
 
-update_display()
-update_led()
+initialize_hardware()
+if power_on():
+    update_display()
+    update_led()
 
 # ----------------------------------------------------
 # MAIN LOOP
@@ -373,117 +556,144 @@ update_led()
 power_off_displayed = False
 
 while True:
+    try:
 
-    # -------------------------------
-    # POWER OFF
-    # -------------------------------
-    if slide.value() == 1:
-        speaker.duty_u16(0)
-        led.off()
+        # -------------------------------
+        # POWER OFF
+        # -------------------------------
+        if not power_on():
+            if not power_off_displayed:
+                if hardware_error:
+                    shutdown_outputs()
+                mute_speaker()
+                led_call("off")
+                show_screen(hardware_error or "POWER OFF")
+                print(hardware_error or "POWER OFF")
+                power_off_displayed = True
 
-        if not power_off_displayed:
-            lcd.clear()
-            lcd.putstr("POWER OFF")
-            power_off_displayed = True
-
-        time.sleep(0.2)
-        continue
-
-    if power_off_displayed:
-        power_off_displayed = False
-        update_display()
-        update_led()
-
-    if storage_error:
-        speaker.duty_u16(0)
-        time.sleep(0.1)
-        continue
-
-    if state != "PLAYING":
-        update_title_scroll()
-
-    # -------------------------------
-    # PLAY / PAUSE BUTTON
-    # -------------------------------
-    if btn_play.value() == 0:
-        if state == "STOPPED":
-            state = "PLAYING"
-        elif state == "PLAYING":
-            state = "PAUSED"
-            speaker.duty_u16(0)
-        elif state == "PAUSED":
-            state = "PLAYING"
-
-        update_display()
-        update_led()
-        time.sleep(0.25)
-
-    # -------------------------------
-    # STOP BUTTON
-    # -------------------------------
-    if btn_stop.value() == 0:
-        speaker.duty_u16(0)
-        state = "STOPPED"
-        update_display()
-        update_led()
-        time.sleep(0.25)
-
-    # -------------------------------
-    # NEXT TRACK - RANDOM
-    # -------------------------------
-    if btn_next.value() == 0:
-        index = random_track_index(index)
-        state = "STOPPED"
-        update_display()
-        update_led()
-        time.sleep(0.25)
-
-    # -------------------------------
-    # PREVIOUS TRACK
-    # -------------------------------
-    if btn_prev.value() == 0:
-        index = (index - 1) % len(tracks)
-        state = "STOPPED"
-        update_display()
-        update_led()
-        time.sleep(0.25)
-
-    # -------------------------------
-    # PLAYBACK LOOP
-    # -------------------------------
-    if state == "PLAYING":
-        result = play_wav("/sd/" + tracks[index])
-        speaker.duty_u16(0)
-
-        if result == "track_change":
-            update_display()
-            update_led()
-            time.sleep(0.25)
+            time.sleep(0.2)
             continue
 
-        if result == "paused":
+        if not startup_complete and not hardware_error:
+            power_off_displayed = False
+            initialize_hardware()
+            # A boot wait may have observed OFF; let the OFF branch own the screen.
+            if not power_on():
+                continue
             update_display()
             update_led()
-            time.sleep(0.25)
-            continue
 
-        if result == "stopped":
+        if power_off_displayed:
+            power_off_displayed = False
             update_display()
             update_led()
-            time.sleep(0.25)
-            continue
 
-        if result == "interrupted":
-            continue
-
-        if result == "ended":
-            index = random_track_index(index)
-            state = "PLAYING"
-            update_display()
-            update_led()
+        if hardware_error or storage_error:
+            if hardware_error:
+                state = "STOPPED"
+                shutdown_outputs()
+            mute_speaker()
             time.sleep(0.1)
             continue
 
-        state = "STOPPED"
+        if state != "PLAYING":
+            update_title_scroll()
+
+        # -------------------------------
+        # PLAY / PAUSE BUTTON
+        # -------------------------------
+        if btn_play.value() == 0:
+            if state == "STOPPED":
+                state = "PLAYING"
+            elif state == "PLAYING":
+                state = "PAUSED"
+                mute_speaker()
+            elif state == "PAUSED":
+                state = "PLAYING"
+
+            update_display()
+            update_led()
+            time.sleep(0.25)
+
+        # -------------------------------
+        # STOP BUTTON
+        # -------------------------------
+        if btn_stop.value() == 0:
+            mute_speaker()
+            state = "STOPPED"
+            update_display()
+            update_led()
+            time.sleep(0.25)
+
+        # -------------------------------
+        # NEXT TRACK - RANDOM
+        # -------------------------------
+        if btn_next.value() == 0:
+            index = random_track_index(index)
+            state = "STOPPED"
+            update_display()
+            update_led()
+            time.sleep(0.25)
+
+        # -------------------------------
+        # PREVIOUS TRACK
+        # -------------------------------
+        if btn_prev.value() == 0:
+            index = (index - 1) % len(tracks)
+            state = "STOPPED"
+            update_display()
+            update_led()
+            time.sleep(0.25)
+
+        # -------------------------------
+        # PLAYBACK LOOP
+        # -------------------------------
+        if state == "PLAYING":
+            result = play_wav("/sd/" + tracks[index])
+            mute_speaker()
+            if hardware_error:
+                state = "STOPPED"
+                shutdown_outputs()
+                update_display()
+                continue
+
+            if result == "track_change":
+                update_display()
+                update_led()
+                time.sleep(0.25)
+                continue
+
+            if result == "paused":
+                update_display()
+                update_led()
+                time.sleep(0.25)
+                continue
+
+            if result == "stopped":
+                update_display()
+                update_led()
+                time.sleep(0.25)
+                continue
+
+            if result == "interrupted":
+                continue
+
+            if result == "ended":
+                index = random_track_index(index)
+                state = "PLAYING"
+                update_display()
+                update_led()
+                time.sleep(0.1)
+                continue
+
+            state = "STOPPED"
+            update_display()
+            update_led()
+    except Exception as e:
+        hardware_fault("HARDWARE ERROR", e)
+        shutdown_outputs()
         update_display()
-        update_led()
+        time.sleep(0.2)
+    except BaseException:
+        shutdown_outputs()
+        raise

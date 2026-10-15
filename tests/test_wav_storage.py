@@ -111,7 +111,7 @@ class StoragePlayback(unittest.TestCase):
                 m['btn_play'].level = 0
                 h.run_loop(3)
                 self.assertEqual(fail.call_count, 1)  # no automatic retry
-                self.assertEqual(m['lcd'].lines[0], 'SD ERROR')
+                self.assertEqual(m['lcd'].lines[0].rstrip(), 'SD ERROR')
                 self.assertEqual(h.unmounts, ['/sd'] if stage == 'listdir' else [])
                 self.assertEqual(m['speaker'].duties[-1], 0)
 
@@ -121,13 +121,14 @@ class StoragePlayback(unittest.TestCase):
                 h = Harness(files=files)
                 m = h.boot()
                 self.assertEqual(m['storage_error'], 'NO WAV FILES')
-                self.assertEqual(m['lcd'].lines[0], 'NO WAV FILES')
+                self.assertEqual(m['lcd'].lines[0].rstrip(), 'NO WAV FILES')
+                m['slide'].level = 1
                 h.run_loop()
-                self.assertEqual(m['lcd'].lines[0], 'POWER OFF')
+                self.assertEqual(m['lcd'].lines[0].rstrip(), 'POWER OFF')
                 m['slide'].level = 0
                 m['btn_next'].level = m['btn_play'].level = 0
                 h.run_loop(2)
-                self.assertEqual(m['lcd'].lines[0], 'NO WAV FILES')
+                self.assertEqual(m['lcd'].lines[0].rstrip(), 'NO WAV FILES')
                 self.assertEqual(m['state'], 'STOPPED')
                 self.assertEqual(m['speaker'].duties[-1], 0)
 
@@ -203,7 +204,7 @@ class StoragePlayback(unittest.TestCase):
         self.h.clock.sleep_us = power_off
         self.h.run_loop(2)
         self.assertEqual((m['index'], m['state']), (0, 'PLAYING'))
-        self.assertEqual(m['lcd'].lines[0], 'POWER OFF')
+        self.assertEqual(m['lcd'].lines[0].rstrip(), 'POWER OFF')
         self.assertEqual(m['speaker'].duties[-1], 0)
         self.assertTrue(self.h.handles[-1].closed)
 

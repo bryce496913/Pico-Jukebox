@@ -10,6 +10,9 @@ map, known issues, cleanup priorities, and required hardware checks.
 fixes and current storage behavior. Deploy `wav_reader.py` alongside `main.py`
 and the existing drivers. Supported songs are 8-bit unsigned, mono, 8000 Hz PCM
 RIFF/WAVE files; other formats are skipped.
+[Pass 3 startup reliability](docs/STARTUP_RELIABILITY.md) describes deferred
+startup while soft power is OFF, safe peripheral failure handling, and Thonny
+real-device validation instructions.
 
 Run the host regression suite from this directory with Python 3.10+:
 
