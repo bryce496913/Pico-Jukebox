@@ -344,16 +344,20 @@ def seed_random():
     seed = time.ticks_us() ^ pot.read_u16() ^ len(tracks)
     random.seed(seed)
 
+MAX_RANDOM_TRACK_ATTEMPTS = 32
+
+
 def random_track_index(current_index=None):
     if len(tracks) <= 1:
         return 0
 
-    new_index = current_index
-
-    while new_index == current_index:
+    # Preserve rejection sampling normally, but never hang audio on a stuck
+    # generator. The existing playback error handler mutes/stops on exhaustion.
+    for _ in range(MAX_RANDOM_TRACK_ATTEMPTS):
         new_index = random.getrandbits(16) % len(tracks)
-
-    return new_index
+        if new_index != current_index:
+            return new_index
+    raise OSError("Random track selection did not progress")
 
 # ----------------------------------------------------
 # LCD SCROLLING TITLE HELPERS
@@ -451,8 +455,62 @@ def update_music_led(chunk):
 # WAV PLAYER
 # ----------------------------------------------------
 
-def play_wav(path):
+def _play_pcm(f, remaining):
+    """Play validated PCM; play_wav owns the file and guarantees final mute.
+
+    Keep the hardware-tuned sample loop intact. Storage, LED and LCD operations
+    stay at chunk boundaries; no scheduler/probe/helper is added per sample.
+    """
     global state, index
+
+    while remaining and state == "PLAYING" and power_on() and hardware_error is None:
+        chunk = read_exact(f, min(512, remaining))
+        remaining -= len(chunk)
+
+        update_music_led(chunk)
+        if hardware_error:
+            return "error"
+
+        for b in chunk:
+            volume8 = pot.read_u16() >> 8
+            gain = volume8 // 25
+            level = b * gain
+
+            speaker.duty_u16(level)
+
+            time.sleep_us(10)
+
+            if btn_stop.value() == 0:
+                state = "STOPPED"
+                mute_speaker()
+                return "stopped"
+
+            if btn_play.value() == 0:
+                state = "PAUSED"
+                mute_speaker()
+                return "paused"
+
+            if btn_next.value() == 0:
+                index = random_track_index(index)
+                state = "PLAYING"
+                mute_speaker()
+                return "track_change"
+
+            if btn_prev.value() == 0:
+                index = (index - 1) % len(tracks)
+                state = "PLAYING"
+                mute_speaker()
+                return "track_change"
+
+        update_title_scroll()
+
+    # Soft-off is not EOF: do not choose a new track on interruption.
+    return "ended" if remaining == 0 else "interrupted"
+
+
+def play_wav(path):
+    """Validate/open one song and contain failures around the PCM loop."""
+    global state
 
     if hardware_error or speaker is None:
         mute_speaker()
@@ -462,49 +520,7 @@ def play_wav(path):
         with open(path, "rb") as f:
             remaining = audio_data(f)
 
-            while remaining and state == "PLAYING" and power_on() and hardware_error is None:
-                chunk = read_exact(f, min(512, remaining))
-                remaining -= len(chunk)
-
-                update_music_led(chunk)
-                if hardware_error:
-                    return "error"
-
-                for b in chunk:
-                    volume8 = pot.read_u16() >> 8
-                    gain = volume8 // 25
-                    level = b * gain
-
-                    speaker.duty_u16(level)
-
-                    time.sleep_us(10)
-
-                    if btn_stop.value() == 0:
-                        state = "STOPPED"
-                        mute_speaker()
-                        return "stopped"
-
-                    if btn_play.value() == 0:
-                        state = "PAUSED"
-                        mute_speaker()
-                        return "paused"
-
-                    if btn_next.value() == 0:
-                        index = random_track_index(index)
-                        state = "PLAYING"
-                        mute_speaker()
-                        return "track_change"
-
-                    if btn_prev.value() == 0:
-                        index = (index - 1) % len(tracks)
-                        state = "PLAYING"
-                        mute_speaker()
-                        return "track_change"
-
-                update_title_scroll()
-
-            # Soft-off is not EOF: do not choose a new track on interruption.
-            return "ended" if remaining == 0 else "interrupted"
+            return _play_pcm(f, remaining)
 
     except Exception as e:
         mute_speaker()
