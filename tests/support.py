@@ -25,9 +25,9 @@ def wav_bytes(samples=b'\0\x80\xff', extra=b'', trailing=b'', **format_fields):
 class Pin:
     IN, OUT, PULL_UP = 0, 1, 2
 
-    def __init__(self, number, mode=None, pull=None):
+    def __init__(self, number, mode=None, pull=None, value=None):
         self.number, self.mode, self.pull = number, mode, pull
-        self.level = 1
+        self.level = 1 if value is None else value
 
     def value(self, value=None):
         if value is not None:
@@ -41,12 +41,18 @@ class Pin:
 class PWM:
     def __init__(self, pin):
         self.pin, self.duties, self.frequency = pin, [], None
+        self.frequencies, self.deinitialized = [], False
 
     def freq(self, value):
         self.frequency = value
+        self.frequencies.append(value)
 
     def duty_u16(self, value):
         self.duties.append(value)
+
+
+    def deinit(self):
+        self.deinitialized = True
 
 
 class ADC:
@@ -98,8 +104,10 @@ class Clock:
 class LCD:
     def __init__(self, *args):
         self.lines, self.row = {}, 0
+        self.args, self.clears, self.writes, self.backlights = args, 0, [], 0
 
     def clear(self):
+        self.clears += 1
         self.lines.clear()
         self.row = 0
 
@@ -108,9 +116,10 @@ class LCD:
 
     def putstr(self, text):
         self.lines[self.row] = text
+        self.writes.append((self.row, text))
 
     def backlight_on(self):
-        pass
+        self.backlights += 1
 
 
 class EndLoop(BaseException):
@@ -118,9 +127,27 @@ class EndLoop(BaseException):
 
 
 class Harness:
-    def __init__(self, files=None, devices=None):
+    def __init__(self, files=None, devices=None, slide_on=True):
         self.clock = Clock()
-        self.machine = types.SimpleNamespace(Pin=Pin, PWM=PWM, ADC=ADC, SPI=Bus, I2C=Bus)
+        self.pins, self.pwms, self.buses, self.logs = [], [], [], []
+        h = self
+        class InputPin(Pin):
+            def __init__(self, number, *args, **kwargs):
+                super().__init__(number, *args, **kwargs)
+                if number == 22:
+                    self.level = 0 if slide_on else 1
+                h.pins.append(self)
+        class OutputPWM(PWM):
+            def __init__(self, pin):
+                super().__init__(pin)
+                h.pwms.append(self)
+        class PeripheralBus(Bus):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                h.buses.append(self)
+            def scan(self):
+                return [0x27] if devices is None else devices
+        self.machine = types.SimpleNamespace(Pin=InputPin, PWM=OutputPWM, ADC=ADC, SPI=PeripheralBus, I2C=PeripheralBus)
         self.files = files if files is not None else {'b.wav': wav_bytes(), 'A.WAV': wav_bytes(b'\x80'), 'ignore.txt': b''}
         self.handles, self.mounts, self.unmounts = [], [], []
         self.os = types.SimpleNamespace(listdir=lambda path: list(self.files), mount=lambda sd, path: self.mounts.append(path),
@@ -133,8 +160,6 @@ class Harness:
         self.modules['wav_reader'] = self.load('wav_reader.py')
         self.modules['sdcard'] = types.SimpleNamespace(SDCard=lambda spi, cs: object())
         self.modules['i2c_lcd'] = types.SimpleNamespace(I2cLcd=LCD)
-        if devices is not None:
-            self.machine.I2C = lambda *a, **kw: types.SimpleNamespace(scan=lambda: devices)
 
     def load(self, name):
         module = types.ModuleType(name[:-3])
@@ -158,7 +183,7 @@ class Harness:
         self.loop = tree.body.pop()
         assert isinstance(self.loop, ast.While)
         self.env = {'open': self.open}
-        with patch.dict('sys.modules', self.modules), patch.object(builtins, 'print'):
+        with patch.dict('sys.modules', self.modules), patch.object(builtins, 'print', side_effect=lambda *args: self.logs.append(args)):
             exec(compile(tree, 'main.py', 'exec'), self.env)
         return self.env
 
@@ -177,6 +202,7 @@ class Harness:
         bounded = ast.fix_missing_locations(ast.Module(body=[loop], type_ignores=[]))
         self.env['_step'] = step
         try:
-            exec(compile(bounded, 'main.py', 'exec'), self.env)
+            with patch.object(builtins, 'print', side_effect=lambda *args: self.logs.append(args)):
+                exec(compile(bounded, 'main.py', 'exec'), self.env)
         except EndLoop:
             pass

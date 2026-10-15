@@ -1,6 +1,6 @@
 import unittest
 from unittest.mock import patch
-from support import Harness, Pin, Bus, EndLoop
+from support import Harness, Pin, Bus
 
 
 class Baseline(unittest.TestCase):
@@ -95,9 +95,10 @@ class Baseline(unittest.TestCase):
 
     def test_soft_off_preserves_state_and_mutes(self):
         self.m['state'] = 'PAUSED'
+        self.m['slide'].level = 1
         self.h.run_loop(2)
         self.assertEqual(self.m['state'], 'PAUSED')
-        self.assertEqual(self.m['lcd'].lines[0], 'POWER OFF')
+        self.assertEqual(self.m['lcd'].lines[0].rstrip(), 'POWER OFF')
         self.assertEqual(self.m['speaker'].duties[-1], 0)
         self.assertEqual(self.m['led'].red.duties[-1], 0)
 
@@ -144,20 +145,14 @@ class Baseline(unittest.TestCase):
                 self.m['play_wav']('/sd/b.wav')
                 self.assertEqual(self.m['speaker'].duties[before:], [0, 128 * gain, 255 * gain, 0])
 
-    def test_missing_lcd_enters_sleep_loop(self):
-        for h in (Harness(devices=[]),):
-            original_sleep = h.clock.sleep
-
-            def sleep(seconds):
-                if seconds == 1:
-                    raise EndLoop()
-                original_sleep(seconds)
-
-            h.clock.sleep = sleep
-            with self.assertRaises(EndLoop):
-                h.boot()
-            self.assertNotIn('state', h.env)
-            self.assertEqual(h.env['speaker'].duties[-1], 0)
+    def test_missing_lcd_is_a_muted_reported_hardware_fault(self):
+        h = Harness(devices=[])
+        m = h.boot()
+        self.assertEqual(m['hardware_error'], 'LCD ERROR')
+        self.assertIsNone(m['speaker'])
+        self.assertFalse(h.mounts)
+        h.run_loop(2)
+        self.assertEqual(m['state'], 'STOPPED')
 
     def test_scroll_across_tick_wrap(self):
         m = self.m
