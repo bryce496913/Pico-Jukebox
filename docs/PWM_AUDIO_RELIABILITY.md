@@ -1,5 +1,9 @@
 # Pass 4: stabilize the existing PWM playback path
 
+This is the Pass 4 audit snapshot. [Pass 5](CONTROLS_AND_STATES.md) subsequently
+corrects input/state handling and pause position; its required bookkeeping changes
+the control portion of the sample loop. Signal math and the 10 us sleep remain.
+
 The priority is the working Monk Makes Amplified Speaker v2 / GP18 PWM path.
 The default remains 40000 Hz carrier, unsigned 8-bit mono 8000 Hz source WAV,
 GP26 ADC volume, and the hardware-tuned `time.sleep_us(10)` loop. No I2S,
@@ -169,7 +173,11 @@ known_samples = {"/sd/comparison.wav": 80000}  # EXAMPLE: replace with actual co
 actual_play_wav = play_wav
 
 def play_wav(path):
-    report = measure_playback(actual_play_wav, path, known_samples.get(path))
+    count = known_samples.get(path)
+    # Pass 5: an ended resume emits only the remaining tail, not the full song.
+    if count is not None and resume_path == path:
+        count -= resume_offset
+    report = measure_playback(actual_play_wav, path, count if count else None)
     print("Audio timing:", path, report)
     return report["result"]
 ```

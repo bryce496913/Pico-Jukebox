@@ -1,5 +1,9 @@
 # Pass 3: predictable boot and safe peripheral initialization
 
+This is the Pass 3 startup snapshot. [Pass 5](CONTROLS_AND_STATES.md) subsequently
+changes normal OFF/ON to a fresh STOPPED state, adds `buttons.py`, and corrects
+button/pause transitions. Boot test and peripheral safeguards remain in effect.
+
 This pass applies to `main.py`, the GP18 PWM application for the Monk Makes
 Amplified Speaker v2. The experimental I2S application is not a supported startup
 entry point. There are no new UI flows, extra sounds or hardware pin changes.
@@ -122,7 +126,7 @@ physically failed peripheral.
    MicroPython interpreter and correct USB port. Stop the current program with
    Ctrl-C and save backups of the Pico files using View > Files. Record
    `sys.implementation` and `os.uname()` in the Shell for the validation report.
-   Copy `main.py`, `rgb_led.py`, `i2c_lcd.py`, `sdcard.py` and `wav_reader.py` from
+   Copy `main.py`, `buttons.py`, `rgb_led.py`, `i2c_lcd.py`, `sdcard.py` and `wav_reader.py` from
    this branch to the Pico root. Do not copy the I2S experiment as `main.py`.
    Use a known-good, existing 8-bit unsigned mono 8000 Hz PCM WAV on the music card.
 2. Set the slide OFF, then soft-reset with Ctrl-D (or power-cycle the board) once.

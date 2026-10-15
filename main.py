@@ -6,6 +6,7 @@ import random
 from i2c_lcd import I2cLcd
 from rgb_led import RGB_LED
 from wav_reader import audio_data, read_exact, WavError
+from buttons import ButtonLatch
 
 # ----------------------------------------------------
 # STARTUP AND SAFE HARDWARE OPERATIONS
@@ -17,6 +18,10 @@ LCD_ADDRESS = 0x27
 
 slide = speaker_pin = speaker = led = pot = lcd = i2c = None
 btn_play = btn_stop = btn_next = btn_prev = None
+controls = None
+resume_path = None
+resume_offset = 0
+resume_size = 0
 hardware_error = storage_error = None
 storage_mounted = storage_complete = False
 spi = cs = sd = None
@@ -27,6 +32,13 @@ state = "STOPPED"
 startup_complete = False
 lcd_test_attempted = speaker_test_attempted = False
 lcd_lines = [None, None]
+
+
+def clear_resume():
+    global resume_path, resume_offset, resume_size
+    resume_path = None
+    resume_offset = 0
+    resume_size = 0
 
 
 def mute_speaker():
@@ -41,6 +53,7 @@ def mute_speaker():
         print("Speaker mute failed:", e)
         hardware_error = "SPEAKER ERROR"
         state = "STOPPED"
+        clear_resume()
     try:
         speaker.deinit()
     except Exception as e:
@@ -54,7 +67,9 @@ def mute_speaker():
 
 def shutdown_outputs():
     """Release outputs after an aborted startup or an interpreter interrupt."""
-    global speaker, led, storage_mounted, outputs_released
+    global speaker, led, storage_mounted, outputs_released, state
+    state = "STOPPED"
+    clear_resume()
     if outputs_released:
         return
     outputs_released = True
@@ -88,6 +103,7 @@ def hardware_fault(message, error):
         hardware_error = message
         print(message + ":", error)
     state = "STOPPED"
+    clear_resume()
     mute_speaker()
 
 
@@ -248,7 +264,7 @@ def initialize_storage():
 def initialize_hardware():
     """Resume deferred stages only on ON; completed stages/tests never repeat."""
     global i2c, lcd, lcd_addr, led, pot, speaker, startup_complete
-    global btn_play, btn_stop, btn_next, btn_prev, index, outputs_released
+    global btn_play, btn_stop, btn_next, btn_prev, index, outputs_released, controls
     if startup_complete or hardware_error or not power_on():
         return
     outputs_released = False
@@ -283,6 +299,7 @@ def initialize_hardware():
             btn_stop = Pin(17, Pin.IN, Pin.PULL_UP)
             btn_next = Pin(19, Pin.IN, Pin.PULL_UP)
             btn_prev = Pin(21, Pin.IN, Pin.PULL_UP)
+            controls = ButtonLatch()
         stage = "ADC ERROR"
         if pot is None:
             pot = ADC(26)
@@ -309,6 +326,10 @@ def initialize_hardware():
         seed_random()
         index = random_track_index(None)
         startup_complete = True
+        stage = "GPIO ERROR"
+        # A key held through boot must be released before it can start playback.
+        if any(pin.value() == 0 for pin in (btn_stop, btn_play, btn_next, btn_prev)):
+            controls.block()
     except Exception as e:
         hardware_fault(stage, e)
     except BaseException:
@@ -455,56 +476,128 @@ def update_music_led(chunk):
 # WAV PLAYER
 # ----------------------------------------------------
 
-def _play_pcm(f, remaining):
-    """Play validated PCM; play_wav owns the file and guarantees final mute.
+def poll_controls():
+    """Idle polling shares the same latch and priority as the sample loop."""
+    if controls is None:
+        return None
+    if btn_stop.value() == 0:
+        event = "stop"
+    elif btn_play.value() == 0:
+        event = "play"
+    elif btn_next.value() == 0:
+        event = "next"
+    elif btn_prev.value() == 0:
+        event = "prev"
+    else:
+        if not controls.armed:
+            controls.released(time.ticks_ms())
+        return None
+    return event if controls.press(event) else None
 
-    Keep the hardware-tuned sample loop intact. Storage, LED and LCD operations
-    stay at chunk boundaries; no scheduler/probe/helper is added per sample.
+
+def apply_control(event, path=None, position=0, data_size=0):
+    """One transition path for idle and in-playback controls, always muted first."""
+    global state, index, resume_path, resume_offset, resume_size
+    mute_speaker()
+    if hardware_error or storage_error or not tracks:
+        state = "STOPPED"
+        clear_resume()
+        return
+    if event == "stop":
+        state = "STOPPED"
+        clear_resume()
+    elif event == "play":
+        if state == "PLAYING":
+            # Position is an emitted-sample count, not the buffered file cursor.
+            resume_path, resume_offset, resume_size = path, position, data_size
+            state = "PAUSED"
+        else:
+            if state == "STOPPED":
+                clear_resume()
+            state = "PLAYING"
+    elif event in ("next", "prev"):
+        index = random_track_index(index) if event == "next" else (index - 1) % len(tracks)
+        clear_resume()
+        # A paused selection stays paused at the new song's beginning.
+        if state not in ("PLAYING", "PAUSED"):
+            state = "STOPPED"
+    update_display()
+    update_led()
+
+
+def enter_off():
+    global state, power_off_displayed
+    state = "STOPPED"
+    clear_resume()
+    if controls is not None:
+        controls.block()
+    if not power_off_displayed:
+        mute_speaker()
+        led_call("off")
+        show_screen("POWER OFF", hardware_error or "")
+        print("POWER OFF")
+        power_off_displayed = True
+
+
+def _play_pcm(f, remaining, path, position):
+    """Emit validated PCM; the wrapper owns the file and final mute.
+
+    A small integer tracks the exact emitted offset on pause. Release timing
+    is checked every 32 samples while latched, never on every ordinary sample.
+    ADC/gain/PWM math and the tuned sleep remain unchanged.
     """
-    global state, index
-
-    while remaining and state == "PLAYING" and power_on() and hardware_error is None:
+    data_size = position + remaining
+    while remaining and state == "PLAYING" and hardware_error is None:
+        if not power_on():
+            enter_off()
+            return "interrupted"
         chunk = read_exact(f, min(512, remaining))
         remaining -= len(chunk)
-
+        if not power_on():
+            enter_off()
+            return "interrupted"
         update_music_led(chunk)
         if hardware_error:
             return "error"
 
+        offset = -1
         for b in chunk:
+            offset += 1
             volume8 = pot.read_u16() >> 8
             gain = volume8 // 25
             level = b * gain
-
             speaker.duty_u16(level)
-
             time.sleep_us(10)
 
             if btn_stop.value() == 0:
-                state = "STOPPED"
-                mute_speaker()
-                return "stopped"
+                controls.released_since = None
+                if (controls.armed or controls.last_event != "stop") and controls.press("stop"):
+                    apply_control("stop")
+                    return "stopped"
+            elif btn_play.value() == 0:
+                controls.released_since = None
+                if controls.armed and controls.press("play"):
+                    apply_control("play", path, position + offset + 1, data_size)
+                    return "paused"
+            elif btn_next.value() == 0:
+                controls.released_since = None
+                if controls.armed and controls.press("next"):
+                    apply_control("next")
+                    return "track_change"
+            elif btn_prev.value() == 0:
+                controls.released_since = None
+                if controls.armed and controls.press("prev"):
+                    apply_control("prev")
+                    return "track_change"
+            elif not controls.armed and offset & 31 == 0:
+                controls.released(time.ticks_ms())
 
-            if btn_play.value() == 0:
-                state = "PAUSED"
-                mute_speaker()
-                return "paused"
-
-            if btn_next.value() == 0:
-                index = random_track_index(index)
-                state = "PLAYING"
-                mute_speaker()
-                return "track_change"
-
-            if btn_prev.value() == 0:
-                index = (index - 1) % len(tracks)
-                state = "PLAYING"
-                mute_speaker()
-                return "track_change"
-
+        position += len(chunk)
+        if not power_on():
+            enter_off()
+            return "interrupted"
         update_title_scroll()
 
-    # Soft-off is not EOF: do not choose a new track on interruption.
     return "ended" if remaining == 0 else "interrupted"
 
 
@@ -515,16 +608,29 @@ def play_wav(path):
     if hardware_error or speaker is None:
         mute_speaker()
         state = "STOPPED"
+        clear_resume()
         return "error"
     try:
         with open(path, "rb") as f:
             remaining = audio_data(f)
-
-            return _play_pcm(f, remaining)
+            position = 0
+            if resume_path == path:
+                if resume_size != remaining or not 0 <= resume_offset <= remaining:
+                    raise WavError("Saved playback position no longer matches WAV data")
+                position = resume_offset
+                f.seek(f.tell() + position)
+                remaining -= position
+            else:
+                clear_resume()
+            result = _play_pcm(f, remaining, path, position)
+            if result == "ended":
+                clear_resume()
+            return result
 
     except Exception as e:
         mute_speaker()
         state = "STOPPED"
+        clear_resume()
         print("WAV error:", e)
         return "error"
     finally:
@@ -573,27 +679,16 @@ power_off_displayed = False
 
 while True:
     try:
-
-        # -------------------------------
-        # POWER OFF
-        # -------------------------------
         if not power_on():
-            if not power_off_displayed:
-                if hardware_error:
-                    shutdown_outputs()
-                mute_speaker()
-                led_call("off")
-                show_screen(hardware_error or "POWER OFF")
-                print(hardware_error or "POWER OFF")
-                power_off_displayed = True
-
-            time.sleep(0.2)
+            if hardware_error:
+                shutdown_outputs()
+            enter_off()
+            time.sleep_ms(20)
             continue
 
         if not startup_complete and not hardware_error:
             power_off_displayed = False
             initialize_hardware()
-            # A boot wait may have observed OFF; let the OFF branch own the screen.
             if not power_on():
                 continue
             update_display()
@@ -601,115 +696,59 @@ while True:
 
         if power_off_displayed:
             power_off_displayed = False
+            state = "STOPPED"
+            clear_resume()
             update_display()
             update_led()
 
         if hardware_error or storage_error:
+            state = "STOPPED"
+            clear_resume()
             if hardware_error:
-                state = "STOPPED"
                 shutdown_outputs()
             mute_speaker()
-            time.sleep(0.1)
+            time.sleep_ms(20)
             continue
 
+        # While playing, the sample loop owns input polling and exact position.
         if state != "PLAYING":
-            update_title_scroll()
+            event = poll_controls()
+            if event is not None:
+                apply_control(event)
 
-        # -------------------------------
-        # PLAY / PAUSE BUTTON
-        # -------------------------------
-        if btn_play.value() == 0:
-            if state == "STOPPED":
-                state = "PLAYING"
-            elif state == "PLAYING":
-                state = "PAUSED"
-                mute_speaker()
-            elif state == "PAUSED":
-                state = "PLAYING"
-
-            update_display()
-            update_led()
-            time.sleep(0.25)
-
-        # -------------------------------
-        # STOP BUTTON
-        # -------------------------------
-        if btn_stop.value() == 0:
-            mute_speaker()
-            state = "STOPPED"
-            update_display()
-            update_led()
-            time.sleep(0.25)
-
-        # -------------------------------
-        # NEXT TRACK - RANDOM
-        # -------------------------------
-        if btn_next.value() == 0:
-            index = random_track_index(index)
-            state = "STOPPED"
-            update_display()
-            update_led()
-            time.sleep(0.25)
-
-        # -------------------------------
-        # PREVIOUS TRACK
-        # -------------------------------
-        if btn_prev.value() == 0:
-            index = (index - 1) % len(tracks)
-            state = "STOPPED"
-            update_display()
-            update_led()
-            time.sleep(0.25)
-
-        # -------------------------------
-        # PLAYBACK LOOP
-        # -------------------------------
         if state == "PLAYING":
             result = play_wav("/sd/" + tracks[index])
             mute_speaker()
+            if not power_on():
+                enter_off()
+                continue
             if hardware_error:
                 state = "STOPPED"
+                clear_resume()
                 shutdown_outputs()
                 update_display()
                 continue
-
-            if result == "track_change":
-                update_display()
-                update_led()
-                time.sleep(0.25)
-                continue
-
-            if result == "paused":
-                update_display()
-                update_led()
-                time.sleep(0.25)
-                continue
-
-            if result == "stopped":
-                update_display()
-                update_led()
-                time.sleep(0.25)
-                continue
-
-            if result == "interrupted":
-                continue
-
             if result == "ended":
                 index = random_track_index(index)
                 state = "PLAYING"
                 update_display()
                 update_led()
-                time.sleep(0.1)
-                continue
-
-            state = "STOPPED"
-            update_display()
-            update_led()
+            elif result == "error":
+                state = "STOPPED"
+                clear_resume()
+                update_display()
+                update_led()
+            elif result == "interrupted" and not power_on():
+                enter_off()
+        else:
+            update_title_scroll()
+            time.sleep_ms(5)
     except Exception as e:
         hardware_fault("HARDWARE ERROR", e)
         shutdown_outputs()
         update_display()
-        time.sleep(0.2)
+        time.sleep_ms(20)
     except BaseException:
         shutdown_outputs()
+        clear_resume()
         raise
