@@ -365,20 +365,23 @@ def seed_random():
     seed = time.ticks_us() ^ pot.read_u16() ^ len(tracks)
     random.seed(seed)
 
-MAX_RANDOM_TRACK_ATTEMPTS = 32
-
 
 def random_track_index(current_index=None):
-    if len(tracks) <= 1:
+    count = len(tracks)
+    if count <= 1:
         return 0
-
-    # Preserve rejection sampling normally, but never hang audio on a stuck
-    # generator. The existing playback error handler mutes/stops on exhaustion.
-    for _ in range(MAX_RANDOM_TRACK_ATTEMPTS):
-        new_index = random.getrandbits(16) % len(tracks)
-        if new_index != current_index:
-            return new_index
-    raise OSError("Random track selection did not progress")
+    if current_index is not None and not 0 <= current_index < count:
+        raise ValueError("Current track index out of range")
+    if count == 2 and current_index is not None:
+        return 1 - current_index
+    # Draw over only eligible slots, then skip the current index. No rejection
+    # loop can hang/fault on repeated draws. Only established MicroPython APIs.
+    limit = count if current_index is None else count - 1
+    bits = 16 if limit <= 65536 else 32
+    candidate = random.getrandbits(bits) % limit
+    if current_index is not None and candidate >= current_index:
+        candidate += 1
+    return candidate
 
 # ----------------------------------------------------
 # LCD SCROLLING TITLE HELPERS
@@ -389,23 +392,29 @@ SCROLL_INTERVAL_MS = 350
 
 title_scroll_pos = 0
 last_scroll_ms = 0
+title_filename = None
+title_text = ""
+title_ring = ""
+title_static = ""
+
+
+def lcd_text(text):
+    # Avoid control characters and ROM-dependent glyphs on the LCD.
+    # Portable string operations only; never ljust/encode(errors=...)/CPython APIs.
+    return "".join(char if 32 <= ord(char) <= 126 else
+                   " " if ord(char) < 32 or ord(char) == 127 else "?"
+                   for char in text)
+
 
 def pad_lcd(text):
-    text = str(text)
-
-    if len(text) > LCD_WIDTH:
-        return text[:LCD_WIDTH]
-
+    text = lcd_text(str(text)[:LCD_WIDTH])
     return text + (" " * (LCD_WIDTH - len(text)))
 
+
 def clean_title(filename):
-    title = filename
+    title = filename[:-4] if filename.lower().endswith(".wav") else filename
+    return lcd_text(title.replace("_", " "))
 
-    if title.lower().endswith(".wav"):
-        title = title[:-4]
-
-    title = title.replace("_", " ")
-    return title
 
 def write_lcd_line(row, text):
     line = pad_lcd(text)
@@ -413,46 +422,68 @@ def write_lcd_line(row, text):
         if lcd_call("move_to", 0, row) and lcd_call("putstr", line):
             lcd_lines[row] = line
 
+
+def prepare_title():
+    global title_filename, title_text, title_ring, title_static
+    global title_scroll_pos, last_scroll_ms
+    filename = tracks[index]
+    if filename == title_filename:
+        return False
+    title_filename = filename
+    title_text = clean_title(filename)
+    title_ring = title_text + "   " if len(title_text) > LCD_WIDTH else ""
+    title_static = pad_lcd(title_text) if not title_ring else ""
+    title_scroll_pos = 0
+    last_scroll_ms = time.ticks_ms()
+    return True
+
+
 def current_title_window():
-    title = clean_title(tracks[index])
+    prepare_title()
+    if not title_ring:
+        return title_static
+    start = title_scroll_pos % len(title_ring)
+    end = start + LCD_WIDTH
+    if end <= len(title_ring):
+        return title_ring[start:end]
+    # Allocate at most one display window, not a doubled long filename.
+    return title_ring[start:] + title_ring[:end - len(title_ring)]
 
-    if len(title) <= LCD_WIDTH:
-        return pad_lcd(title)
-
-    padded = title + "   "
-    looped = padded + padded
-    start = title_scroll_pos % len(padded)
-
-    return looped[start:start + LCD_WIDTH]
 
 def reset_title_scroll():
     global title_scroll_pos, last_scroll_ms
+    prepare_title()
     title_scroll_pos = 0
     last_scroll_ms = time.ticks_ms()
 
+
 def update_title_scroll(force=False):
     global title_scroll_pos, last_scroll_ms
-
-    title = clean_title(tracks[index])
-
-    if len(title) <= LCD_WIDTH:
-        if force:
-            write_lcd_line(1, title)
+    changed = prepare_title()
+    if not title_ring:
+        if force or changed:
+            write_lcd_line(1, title_static)
         return
-
-    now = time.ticks_ms()
-
-    if force or time.ticks_diff(now, last_scroll_ms) >= SCROLL_INTERVAL_MS:
+    if force or changed:
         write_lcd_line(1, current_title_window())
-        title_scroll_pos += 1
+        return
+    now = time.ticks_ms()
+    if time.ticks_diff(now, last_scroll_ms) >= SCROLL_INTERVAL_MS:
+        title_scroll_pos = (title_scroll_pos + 1) % len(title_ring)
+        write_lcd_line(1, current_title_window())
         last_scroll_ms = now
 
 # ----------------------------------------------------
 # LED MUSIC REACTION
 # ----------------------------------------------------
 
+MUSIC_LED_DEADBAND = 4
+music_brightness = None
+
+
 def update_music_led(chunk):
-    if not chunk:
+    global music_brightness
+    if not chunk or state != "PLAYING":
         return
 
     peak = 0
@@ -465,12 +496,14 @@ def update_music_led(chunk):
         if amp > peak:
             peak = amp
 
-    brightness = 10 + ((peak * 245) // 127)
-
-    if brightness > 255:
-        brightness = 255
-
-    led_call("color", 0, brightness, 0)
+    # Unsigned PCM spans -128..127: the absolute maximum is 128, not 127.
+    brightness = 10 + ((peak * 245) // 128)
+    if brightness == music_brightness:
+        return
+    if (music_brightness is None or brightness in (10, 255) or
+            abs(brightness - music_brightness) >= MUSIC_LED_DEADBAND):
+        led_call("color", 0, brightness, 0)
+        music_brightness = brightness
 
 # ----------------------------------------------------
 # WAV PLAYER
@@ -521,6 +554,7 @@ def apply_control(event, path=None, position=0, data_size=0):
         # A paused selection stays paused at the new song's beginning.
         if state not in ("PLAYING", "PAUSED"):
             state = "STOPPED"
+        reset_title_scroll()
     update_display()
     update_led()
 
@@ -649,10 +683,11 @@ def update_display():
         return
     write_lcd_line(0, state)
 
-    reset_title_scroll()
     update_title_scroll(force=True)
 
 def update_led():
+    global music_brightness
+    music_brightness = None
     if state == "PLAYING":
         led_call("green_on")
     elif state == "PAUSED":
@@ -731,6 +766,7 @@ while True:
             if result == "ended":
                 index = random_track_index(index)
                 state = "PLAYING"
+                reset_title_scroll()
                 update_display()
                 update_led()
             elif result == "error":

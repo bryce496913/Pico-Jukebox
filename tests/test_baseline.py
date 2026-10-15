@@ -38,7 +38,7 @@ class Baseline(unittest.TestCase):
         self.assertEqual(m['lcd'].lines[1], 'abcdefghijklmnop')
         self.h.clock.sleep_ms(349)
         m['update_title_scroll']()
-        self.assertEqual(m['title_scroll_pos'], 1)
+        self.assertEqual(m['title_scroll_pos'], 0)
         self.h.clock.sleep_ms(1)
         m['update_title_scroll']()
         self.assertEqual(m['lcd'].lines[1], 'bcdefghijklmnopq')
@@ -53,6 +53,7 @@ class Baseline(unittest.TestCase):
         self.assertEqual([p.pin.number for p in (led.red, led.green, led.blue)], [5, 8, 9])
         led.white()
         self.assertEqual([p.duties[-1] for p in (led.red, led.green, led.blue)], [65535] * 3)
+        self.m['state'] = 'PLAYING'
         self.m['update_music_led'](bytes([128] * 16))
         self.assertEqual(led.green.duties[-1], 10 * 257)
         self.m['update_music_led'](b'\0')
