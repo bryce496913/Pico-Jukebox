@@ -1,7 +1,7 @@
 """Startup state and safe-output assertions, with no physical GPIO devices."""
 import unittest
 from unittest.mock import Mock, patch
-from support import Harness, LCD, Pin
+from support import Harness, LCD
 
 
 class Startup(unittest.TestCase):

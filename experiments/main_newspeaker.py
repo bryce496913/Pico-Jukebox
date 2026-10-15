@@ -1,3 +1,4 @@
+# Unsupported I2S prototype; see experiments/README.md. Never deploy as main.py.
 from machine import Pin, SPI, I2C, ADC, I2S
 import sdcard
 import os

@@ -1,3 +1,7 @@
+"""Manual DESTRUCTIVE diagnostic: overwrites /sd/hello.txt. Use a spare card.
+
+Stop main.py and reset the Pico before/after running; do not use on a music card.
+"""
 import os
 from machine import Pin, SPI
 import sdcard
@@ -28,15 +32,18 @@ print("Mounting /sd ...")
 vfs = os.VfsFat(sd)
 os.mount(vfs, "/sd")
 
-print("Mounted! Contents:")
-print(os.listdir("/sd"))
+try:
+    print("Mounted! Contents:")
+    print(os.listdir("/sd"))
 
-# Write/read test
-test_path = "/sd/hello.txt"
-with open(test_path, "w") as f:
-    f.write("hello from pico!\n")
+    # Write/read test
+    test_path = "/sd/hello.txt"
+    with open(test_path, "w") as f:
+        f.write("hello from pico!\n")
 
-with open(test_path, "r") as f:
-    print("Read back:", f.read().strip())
+    with open(test_path, "r") as f:
+        print("Read back:", f.read().strip())
 
-print("Done.")
+    print("Done.")
+finally:
+    os.umount("/sd")

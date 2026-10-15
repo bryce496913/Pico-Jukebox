@@ -9,12 +9,19 @@ from wav_reader import audio_data, read_exact, WavError
 from buttons import ButtonLatch
 
 # ----------------------------------------------------
-# STARTUP AND SAFE HARDWARE OPERATIONS
+# APPROVED SETTINGS / STARTUP AND SAFE HARDWARE OPERATIONS
 # ----------------------------------------------------
 SPEAKER_CARRIER_HZ = 40000
 BOOT_SPEAKER_DUTY = 2000  # ~3% duty; formerly 30000. Verify audibility on device.
 LCD_I2C_HZ = 100000
 LCD_ADDRESS = 0x27
+LCD_WIDTH = 16
+SCROLL_INTERVAL_MS = 350
+MUSIC_LED_DEADBAND = 4
+
+# Wiring and deployment: README.md. Keep the hardware-tested SPI1 constructor.
+# Retained audio tuning lives directly in _play_pcm: 512-byte reads, ADC >> 8,
+# gain // 25, sample * gain, sleep_us(10). Do not tune from host timing results.
 
 slide = speaker_pin = speaker = led = pot = lcd = i2c = None
 btn_play = btn_stop = btn_next = btn_prev = None
@@ -356,11 +363,6 @@ except Exception as e:
 # RANDOM / SHUFFLE HELPERS
 # ----------------------------------------------------
 
-def get_volume8():
-    """Return volume in 0-255 range after ADC initialization."""
-    return pot.read_u16() >> 8
-
-
 def seed_random():
     seed = time.ticks_us() ^ pot.read_u16() ^ len(tracks)
     random.seed(seed)
@@ -386,9 +388,6 @@ def random_track_index(current_index=None):
 # ----------------------------------------------------
 # LCD SCROLLING TITLE HELPERS
 # ----------------------------------------------------
-
-LCD_WIDTH = 16
-SCROLL_INTERVAL_MS = 350
 
 title_scroll_pos = 0
 last_scroll_ms = 0
@@ -477,7 +476,6 @@ def update_title_scroll(force=False):
 # LED MUSIC REACTION
 # ----------------------------------------------------
 
-MUSIC_LED_DEADBAND = 4
 music_brightness = None
 
 
