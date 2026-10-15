@@ -62,13 +62,13 @@ class Baseline(unittest.TestCase):
         self.m['state'] = 'PLAYING'
         self.m['slide'].level = 0
 
-    def test_playback_skips_header_scales_samples_and_closes_file(self):
+    def test_playback_parses_header_scales_samples_and_closes_file(self):
         self.start()
         before = len(self.m['speaker'].duties)
         self.assertEqual(self.m['play_wav']('/sd/b.wav'), 'ended')
-        self.assertEqual(self.m['speaker'].duties[before:], [0, 1280, 2550])
+        self.assertEqual(self.m['speaker'].duties[before:], [0, 1280, 2550, 0])
         self.assertTrue(self.h.handles[-1].closed)
-        # EOF leaves PWM to caller cleanup: recorded limitation, not endorsement.
+        # Pass 2 now guarantees local PWM cleanup as well as caller cleanup.
         self.assertEqual(self.m['state'], 'PLAYING')
 
     def test_playback_button_results_and_priority(self):
@@ -131,8 +131,8 @@ class Baseline(unittest.TestCase):
         self.m['state'] = 'PLAYING'
         before = len(self.m['speaker'].duties)
         self.assertEqual(self.m['play_wav']('/sd/b.wav'), 'ended')
-        self.assertEqual(self.m['speaker'].duties[before:], [0, 1280, 2550])
-        self.assertEqual(len(self.h.handles), 2)
+        self.assertEqual(self.m['speaker'].duties[before:], [0, 1280, 2550, 0])
+        self.assertEqual(len(self.h.handles), 4)  # two discovery probes and two plays
         self.assertTrue(all(f.closed for f in self.h.handles))
 
     def test_volume_zero_and_adc_quantization(self):
@@ -142,10 +142,10 @@ class Baseline(unittest.TestCase):
                 self.m['pot'].reading = reading
                 before = len(self.m['speaker'].duties)
                 self.m['play_wav']('/sd/b.wav')
-                self.assertEqual(self.m['speaker'].duties[before:], [0, 128 * gain, 255 * gain])
+                self.assertEqual(self.m['speaker'].duties[before:], [0, 128 * gain, 255 * gain, 0])
 
-    def test_missing_lcd_and_empty_card_enter_sleep_loop(self):
-        for h in (Harness(devices=[]), Harness(files={})):
+    def test_missing_lcd_enters_sleep_loop(self):
+        for h in (Harness(devices=[]),):
             original_sleep = h.clock.sleep
 
             def sleep(seconds):

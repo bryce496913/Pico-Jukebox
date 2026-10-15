@@ -5,6 +5,7 @@ import time
 import random
 from i2c_lcd import I2cLcd
 from rgb_led import RGB_LED
+from wav_reader import audio_data, read_exact, WavError
 
 # ----------------------------------------------------
 # HARDWARE SETUP
@@ -107,32 +108,54 @@ boot_speaker_test()
 # SD SETUP
 # ----------------------------------------------------
 
-spi = SPI(1,
-          baudrate=1_000_000,
-          polarity=0,
-          phase=0,
-          bits=8,
-          firstbit=SPI.MSB,
-          sck=Pin(10),
-          mosi=Pin(11),
-          miso=Pin(12))
+# Fail closed once per boot; no automatic remount/restart loop on a bad card.
+storage_error = None
+tracks = []
+storage_mounted = False
 
-cs = Pin(13, Pin.OUT)
-sd = sdcard.SDCard(spi, cs)
-os.mount(sd, "/sd")
+try:
+    spi = SPI(1,
+              baudrate=1_000_000,
+              polarity=0,
+              phase=0,
+              bits=8,
+              firstbit=SPI.MSB,
+              sck=Pin(10),
+              mosi=Pin(11),
+              miso=Pin(12))
 
-# ----------------------------------------------------
-# LOAD TRACK LIST
-# ----------------------------------------------------
+    cs = Pin(13, Pin.OUT)
+    sd = sdcard.SDCard(spi, cs)
+    os.mount(sd, "/sd")
+    storage_mounted = True
 
-tracks = [f for f in os.listdir("/sd") if f.lower().endswith(".wav")]
-tracks.sort()
-
-if not tracks:
-    lcd.clear()
-    lcd.putstr("NO WAV FILES")
-    while True:
-        time.sleep(1)
+    # Keep case-insensitive WAV discovery and the original sorted index order.
+    for name in sorted(os.listdir("/sd")):
+        if not name.lower().endswith(".wav"):
+            continue
+        path = "/sd/" + name
+        try:
+            if os.stat(path)[0] & 0xF000 != 0x8000:
+                continue
+            with open(path, "rb") as music:
+                audio_data(music)
+            tracks.append(name)
+        except (OSError, WavError) as e:
+            print("Skipping WAV:", name, e)
+    if not tracks:
+        storage_error = "NO WAV FILES"
+except Exception as e:
+    print("SD storage error:", e)
+    storage_error = "SD ERROR"
+    tracks = []
+    if storage_mounted:
+        try:
+            os.umount("/sd")
+        except OSError:
+            pass
+        storage_mounted = False
+finally:
+    speaker.duty_u16(0)
 
 # ----------------------------------------------------
 # RANDOM / SHUFFLE HELPERS
@@ -257,11 +280,11 @@ def play_wav(path):
 
     try:
         with open(path, "rb") as f:
-            f.read(44)
+            remaining = audio_data(f)
 
-            chunk = f.read(512)
-
-            while chunk and state == "PLAYING" and slide.value() == 0:
+            while remaining and state == "PLAYING" and slide.value() == 0:
+                chunk = read_exact(f, min(512, remaining))
+                remaining -= len(chunk)
 
                 update_music_led(chunk)
 
@@ -298,14 +321,17 @@ def play_wav(path):
 
                 update_title_scroll()
 
-                chunk = f.read(512)
-
-            return "ended"
+            # Soft-off is not EOF: do not choose a new track on interruption.
+            return "ended" if remaining == 0 else "interrupted"
 
     except Exception as e:
-        print("WAV error:", e)
+        speaker.duty_u16(0)
         state = "STOPPED"
+        print("WAV error:", e)
         return "error"
+    finally:
+        # Also covers EOF, parse/read failures and Ctrl-C/BaseException exits.
+        speaker.duty_u16(0)
 
 # ----------------------------------------------------
 # UI HELPERS
@@ -313,6 +339,9 @@ def play_wav(path):
 
 def update_display():
     lcd.clear()
+    if storage_error:
+        lcd.putstr(storage_error)
+        return
 
     lcd.move_to(0, 0)
     lcd.putstr(pad_lcd(state))
@@ -364,6 +393,11 @@ while True:
         power_off_displayed = False
         update_display()
         update_led()
+
+    if storage_error:
+        speaker.duty_u16(0)
+        time.sleep(0.1)
+        continue
 
     if state != "PLAYING":
         update_title_scroll()
@@ -437,6 +471,9 @@ while True:
             update_display()
             update_led()
             time.sleep(0.25)
+            continue
+
+        if result == "interrupted":
             continue
 
         if result == "ended":
