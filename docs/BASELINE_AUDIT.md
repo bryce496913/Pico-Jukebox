@@ -1,7 +1,8 @@
 # Pass 1 baseline audit
 
-This is the historical Pass 1 snapshot. See [Pass 2](STORAGE_RELIABILITY.md) for
-resolved SD/WAV findings, updated storage behavior and current validation.
+This is the historical Pass 1 snapshot, not the current behavior or issue list.
+See the [final release review](RELEASE_READINESS.md) for current status and the
+[README](../README.md) for deployment. Later pass reports record each fix.
 
 Reviewed all 13 tracked Python files at local baseline
 `797f39954e54efb63775376527d91d39de00fad6` on 2026-10-14. No configuration modules,

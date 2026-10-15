@@ -15,7 +15,7 @@ def check_buttons():
     for name, pin in buttons.items():
         if pin.value() == 0:   # pressed (active-low)
             print(name, "pressed")
-            time.sleep(0.2)    # debounce
+            time.sleep(0.2)    # repeat throttle; production uses ButtonLatch
 
 while True:
     check_buttons()

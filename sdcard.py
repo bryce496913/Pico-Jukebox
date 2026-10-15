@@ -1,5 +1,5 @@
 # sdcard.py - SD card driver for MicroPython (SPI mode)
-# Tested-style for RP2040/Pico ports.
+# Simple block interface for VfsFat; host protocol tests are not card validation.
 
 from micropython import const
 import time
