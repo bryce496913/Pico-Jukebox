@@ -18,6 +18,7 @@ LCD_ADDRESS = 0x27
 LCD_WIDTH = 16
 SCROLL_INTERVAL_MS = 350
 MUSIC_LED_DEADBAND = 4
+PLAYBACK_DIAGNOSTICS = True  # One summary after audio returns; disable after testing.
 
 # Wiring and deployment: README.md. Keep the hardware-tested SPI1 constructor.
 # Retained audio tuning lives directly in _play_pcm: 512-byte reads, ADC >> 8,
@@ -39,6 +40,11 @@ state = "STOPPED"
 startup_complete = False
 lcd_test_attempted = speaker_test_attempted = False
 lcd_lines = [None, None]
+
+# Diagnostic scalars only; never incremented or timed per sample. Unknown output
+# position during an exception is None, not an invented sample count.
+playback_phase = playback_exception = playback_control = None
+playback_total = playback_start = playback_position = None
 
 
 def clear_resume():
@@ -528,12 +534,14 @@ def poll_controls():
 
 def apply_control(event, path=None, position=0, data_size=0):
     """One transition path for idle and in-playback controls, always muted first."""
-    global state, index, resume_path, resume_offset, resume_size
+    global state, index, resume_path, resume_offset, resume_size, playback_control
     mute_speaker()
     if hardware_error or storage_error or not tracks:
         state = "STOPPED"
         clear_resume()
         return
+    if PLAYBACK_DIAGNOSTICS:
+        playback_control = event
     if event == "stop":
         state = "STOPPED"
         clear_resume()
@@ -571,6 +579,58 @@ def enter_off():
         power_off_displayed = True
 
 
+def playback_ticks_ms():
+    """Timing is optional: a diagnostic clock failure must not stop playback."""
+    try:
+        return time.ticks_ms()
+    except Exception:
+        return None
+
+
+def playback_result(reason, position):
+    """Record an existing offset only at an exit, including accepted controls."""
+    global playback_position
+    if PLAYBACK_DIAGNOSTICS:
+        playback_position = position
+    return reason
+
+
+def report_playback(path, result, started):
+    """Called once by the main loop, after play_wav closes the file and mutes."""
+    elapsed = None
+    if started is not None:
+        try:
+            elapsed = time.ticks_diff(time.ticks_ms(), started)
+            if elapsed < 0:  # elapsed beyond the clock's unambiguous wrap range
+                elapsed = None
+        except Exception:
+            pass
+    emitted = remaining = None
+    if playback_position is not None and playback_total is not None:
+        emitted = playback_position - playback_start
+        remaining = playback_total - playback_position
+    if hardware_error:
+        cause = "hardware_fault"
+    elif result in ("stopped", "paused", "track_change") and playback_control:
+        cause = "button"
+    elif result == "ended":
+        cause = "eof"
+    elif result == "interrupted" and power_off_displayed:
+        cause = "soft_off"
+    elif result == "error" and playback_phase == "read":
+        cause = "read_error"
+    elif result == "error" and playback_phase in ("open", "header"):
+        cause = "wav_or_file_error"
+    else:
+        cause = "playback_error" if result == "error" else "interrupted"
+    print("PLAYBACK EXIT:", result, "FILE:", repr(path), "CAUSE:", cause,
+          "STATE:", state, "HARDWARE:", hardware_error, "STORAGE:", storage_error,
+          "ELAPSED_MS:", elapsed, "SAMPLES_EMITTED:", emitted,
+          "SAMPLES_REMAINING:", remaining, "SAMPLES_TOTAL:", playback_total,
+          "START_OFFSET:", playback_start, "CONTROL:", playback_control,
+          "PHASE:", playback_phase, "EXCEPTION:", repr(playback_exception))
+
+
 def _play_pcm(f, remaining, path, position):
     """Emit validated PCM; the wrapper owns the file and final mute.
 
@@ -578,19 +638,26 @@ def _play_pcm(f, remaining, path, position):
     is checked every 32 samples while latched, never on every ordinary sample.
     ADC/gain/PWM math and the tuned sleep remain unchanged.
     """
+    global playback_phase, playback_position
     data_size = position + remaining
     while remaining and state == "PLAYING" and hardware_error is None:
         if not power_on():
             enter_off()
-            return "interrupted"
+            return playback_result("interrupted", position)
+        if PLAYBACK_DIAGNOSTICS:
+            playback_phase = "read"
+            playback_position = position
         chunk = read_exact(f, min(512, remaining))
         remaining -= len(chunk)
         if not power_on():
             enter_off()
-            return "interrupted"
+            return playback_result("interrupted", position)
+        if PLAYBACK_DIAGNOSTICS:
+            playback_phase = "output"
+            playback_position = None
         update_music_led(chunk)
         if hardware_error:
-            return "error"
+            return playback_result("error", position)
 
         offset = -1
         for b in chunk:
@@ -605,37 +672,43 @@ def _play_pcm(f, remaining, path, position):
                 controls.released_since = None
                 if (controls.armed or controls.last_event != "stop") and controls.press("stop"):
                     apply_control("stop")
-                    return "stopped"
+                    return playback_result("stopped", position + offset + 1)
             elif btn_play.value() == 0:
                 controls.released_since = None
                 if controls.armed and controls.press("play"):
                     apply_control("play", path, position + offset + 1, data_size)
-                    return "paused"
+                    return playback_result("paused", position + offset + 1)
             elif btn_next.value() == 0:
                 controls.released_since = None
                 if controls.armed and controls.press("next"):
                     apply_control("next")
-                    return "track_change"
+                    return playback_result("track_change", position + offset + 1)
             elif btn_prev.value() == 0:
                 controls.released_since = None
                 if controls.armed and controls.press("prev"):
                     apply_control("prev")
-                    return "track_change"
+                    return playback_result("track_change", position + offset + 1)
             elif not controls.armed and offset & 31 == 0:
                 controls.released(time.ticks_ms())
 
         position += len(chunk)
         if not power_on():
             enter_off()
-            return "interrupted"
+            return playback_result("interrupted", position)
+        if PLAYBACK_DIAGNOSTICS:
+            playback_phase = "display"
+            playback_position = position
         update_title_scroll()
 
-    return "ended" if remaining == 0 else "interrupted"
+    return playback_result("ended" if remaining == 0 else "interrupted", position)
 
 
 def play_wav(path):
     """Validate/open one song and contain failures around the PCM loop."""
-    global state
+    global state, playback_phase, playback_exception, playback_control
+    global playback_total, playback_start, playback_position
+    playback_phase, playback_exception, playback_control = "open", None, None
+    playback_total = playback_start = playback_position = None
 
     if hardware_error or speaker is None:
         mute_speaker()
@@ -644,6 +717,8 @@ def play_wav(path):
         return "error"
     try:
         with open(path, "rb") as f:
+            if PLAYBACK_DIAGNOSTICS:
+                playback_phase = "header"
             remaining = audio_data(f)
             position = 0
             if resume_path == path:
@@ -654,12 +729,17 @@ def play_wav(path):
                 remaining -= position
             else:
                 clear_resume()
+            if PLAYBACK_DIAGNOSTICS:
+                playback_total, playback_start = position + remaining, position
+                playback_position = position
             result = _play_pcm(f, remaining, path, position)
             if result == "ended":
                 clear_resume()
             return result
 
     except Exception as e:
+        if PLAYBACK_DIAGNOSTICS:
+            playback_exception = str(e)
         mute_speaker()
         state = "STOPPED"
         clear_resume()
@@ -750,8 +830,12 @@ while True:
                 apply_control(event)
 
         if state == "PLAYING":
-            result = play_wav("/sd/" + tracks[index])
+            playback_path = "/sd/" + tracks[index]  # controls may change index
+            playback_started = playback_ticks_ms() if PLAYBACK_DIAGNOSTICS else None
+            result = play_wav(playback_path)
             mute_speaker()
+            if PLAYBACK_DIAGNOSTICS:
+                report_playback(playback_path, result, playback_started)
             if not power_on():
                 enter_off()
                 continue

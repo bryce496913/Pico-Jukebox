@@ -4,6 +4,10 @@
 from micropython import const
 import time
 
+# Normal data clock. For Thonny isolation testing only, try 1_000_000 and reset.
+# Keep 10 MHz by default; no automatic speed reduction or protocol change.
+SD_DATA_BAUDRATE_HZ = 10_000_000
+
 _CMD_TIMEOUT = const(10000)
 _TOKEN_DATA = const(0xFE)
 _BLOCK_SIZE = const(512)
@@ -153,7 +157,7 @@ class SDCard:
 
         # Speed up after init (adjust if your wiring/module is flaky)
         try:
-            self.spi.init(baudrate=10_000_000, polarity=0, phase=0)
+            self.spi.init(baudrate=SD_DATA_BAUDRATE_HZ, polarity=0, phase=0)
         except TypeError:
             pass
 
