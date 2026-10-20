@@ -106,6 +106,13 @@ at the existing 350 ms polling interval. Track selection resets scrolling.
 
 ## Troubleshooting and manual diagnostics
 
+For the observed 1–2-second playback stop, see the [focused diagnostic and Thonny
+retest guide](docs/EARLY_PLAYBACK_TERMINATION.md). `PLAYBACK_DIAGNOSTICS = True`
+in `main.py` prints one exit summary after each playback attempt closes/mutes;
+set it to `False` and reset to disable. The single SD data-clock setting is
+`SD_DATA_BAUDRATE_HZ` in `sdcard.py`, default 10 MHz; the guide explains a temporary
+1 MHz comparison. These diagnostics do not establish a physical root cause yet.
+
 | Symptom | Check / action |
 | --- | --- |
 | `SD ERROR` | Card seating, FAT format, power and SPI1 wiring. Repair and reset; initialization does not retry indefinitely. |
